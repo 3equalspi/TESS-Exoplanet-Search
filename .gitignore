@@ -1,0 +1,6 @@
+venv/
+tess_lc_cache/
+tess_verify_cache/
+catalog_cache/
+__pycache__/
+*.pyc
