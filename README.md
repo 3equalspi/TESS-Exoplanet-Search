@@ -5,7 +5,7 @@ Main code for extracting data and initial analysis is withon tess_search.py
 
 ## Post-search candidate review
 
-After tess_search.py finishes, it records TLS detections, including signals that failed its initial gates, in tess_lc_cache/candidate_signals.csv. The existing processed_targets.csv remains the resume list; it records attempted TICs, not candidate detections.
+After tess_search.py finishes, it records TLS detections, including signals that failed its initial gates, in tess_lc_cache/candidate_signals.csv. The existing processed_targets.csv remains the resume list; it records attempted TICs, not candidate detections. This manifest is created for searches run with the updated code; earlier runs are not reconstructed automatically. To rescan an earlier TIC, remove only that TIC's line from processed_targets.csv and rerun tess_search.py.
 
 Run the follow-up review with:
 
