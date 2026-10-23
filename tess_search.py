@@ -866,13 +866,13 @@ if __name__ == "__main__":
                     else:
                         print("  -> Vetting INCONCLUSIVE - transit too narrow relative to the "
                               "phase-folded bins to resolve odd/even or secondary-eclipse depth.")
-                    if PLOT_ALL:
-                        plot_candidate(lc_search, tls_results, vet, tic_id,
-                                        pass_suffix=f"pass{search_pass}" if search_pass > 1 else "")
                     record_candidate_signal(
                         tic_id, search_pass, period, tls_results.T0, depth, duration, sde,
                         coverage_frac, n_obs, passed_all_gates, vet=vet,
                     )
+                    if PLOT_ALL:
+                        plot_candidate(lc_search, tls_results, vet, tic_id,
+                                        pass_suffix=f"pass{search_pass}" if search_pass > 1 else "")
 
                     if vet["passed"]:
                         # Only mask a signal that passed FULL vetting.
