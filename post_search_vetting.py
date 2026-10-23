@@ -99,13 +99,14 @@ def review(row, cache, output):
                   if inside.sum() >= 3 and outside.sum() >= 8 else np.nan)
 
     k0, k1 = int(np.ceil((t[0] - epoch) / period)), int(np.floor((t[-1] - epoch) / period))
-    centers, depths = [], []
+    centers, depths, event_cycles = [], [], []
     for k in range(k0, k1 + 1):
         center = epoch + k * period
         d = event_depth(t, y, center, duration)
         if np.isfinite(d):
             centers.append(center)
             depths.append(d)
+            event_cycles.append(k)
     depths = np.asarray(depths)
     flags = []
     finite = np.asarray(sd)[np.isfinite(sd)]
@@ -119,7 +120,9 @@ def review(row, cache, output):
             flags.append("sector_depth_inconsistent")
     odd_even = np.nan
     if len(depths) >= 4:
-        even, odd = np.nanmedian(depths[::2]), np.nanmedian(depths[1::2])
+        cycles = np.asarray(event_cycles)
+        even = np.nanmedian(depths[cycles % 2 == 0])
+        odd = np.nanmedian(depths[cycles % 2 == 1])
         odd_even = float(abs(even - odd) / max(abs(float(np.nanmedian(depths))), 1e-6))
         if odd_even > .5:
             flags.append("odd_even_depth_difference")
@@ -161,7 +164,7 @@ def review(row, cache, output):
     ax[3].axhline(0, color=".5", lw=.8)
     if len(depths):
         ax[3].scatter(np.arange(len(depths)), depths * 1e3,
-                      c=np.arange(len(depths)) % 2, cmap="coolwarm", s=24)
+                      c=np.asarray(event_cycles) % 2, cmap="coolwarm", s=24)
     ax[3].set(ylabel="Depth (ppt)", xlabel="Observed event sequence")
     ax[3].set_title("Individual event depths (alternating colors)")
     output.mkdir(parents=True, exist_ok=True)
