@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Review TLS detections from tess_search.py; output is triage for human inspection."""
 import argparse
 import csv
 import re
