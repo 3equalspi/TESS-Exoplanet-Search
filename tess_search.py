@@ -2,6 +2,7 @@
 import os
 import sys
 import glob
+import csv
 import time
 import signal
 import warnings
@@ -700,6 +701,7 @@ def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
 # Main
 # -----------------------------------------------------------------
 RESULTS_LOG = os.path.join(CACHE_DIR, "processed_targets.csv")
+CANDIDATE_LOG = os.path.join(CACHE_DIR, "candidate_signals.csv")
 
 def load_processed():
     if not os.path.exists(RESULTS_LOG):
@@ -711,6 +713,43 @@ def mark_processed(tic_id):
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(RESULTS_LOG, "a") as f:
         f.write(f"{tic_id}\n")
+
+def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration, sde,
+                           coverage_frac, n_obs, basic_gates_passed, vet=None):
+    """Persist TLS detections for follow-up review, including signals failing basic gates."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    fields = ["tic_id", "search_pass", "period_days", "epoch_btjd", "depth",
+              "duration_days", "sde", "coverage_fraction", "observed_transits",
+              "basic_gates_passed", "initial_vet_passed", "initial_vet_resolvable",
+              "odd_even_diff", "secondary_depth"]
+    key = (str(tic_id), str(search_pass), f"{float(period):.6f}")
+    if os.path.exists(CANDIDATE_LOG):
+        try:
+            with open(CANDIDATE_LOG, newline="") as existing:
+                for old in csv.DictReader(existing):
+                    if (old.get("tic_id"), old.get("search_pass"),
+                        f"{float(old.get('period_days') or 0):.6f}") == key:
+                        return
+        except (OSError, ValueError, csv.Error):
+            pass
+    row = {
+        "tic_id": int(tic_id), "search_pass": int(search_pass),
+        "period_days": float(period), "epoch_btjd": float(epoch), "depth": float(depth),
+        "duration_days": float(duration), "sde": float(sde),
+        "coverage_fraction": float(coverage_frac), "observed_transits": int(n_obs),
+        "basic_gates_passed": bool(basic_gates_passed),
+        "initial_vet_passed": vet.get("passed", "") if vet else "",
+        "initial_vet_resolvable": vet.get("resolvable", "") if vet else "",
+        "odd_even_diff": vet.get("odd_even_diff", "") if vet else "",
+        "secondary_depth": vet.get("secondary_depth", "") if vet else "",
+    }
+    header = not os.path.exists(CANDIDATE_LOG) or os.path.getsize(CANDIDATE_LOG) == 0
+    with open(CANDIDATE_LOG, "a", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=fields)
+        if header:
+            writer.writeheader()
+        writer.writerow(row)
+
 
 if __name__ == "__main__":
     processed = load_processed()
@@ -827,6 +866,10 @@ if __name__ == "__main__":
                     else:
                         print("  -> Vetting INCONCLUSIVE - transit too narrow relative to the "
                               "phase-folded bins to resolve odd/even or secondary-eclipse depth.")
+                    record_candidate_signal(
+                        tic_id, search_pass, period, tls_results.T0, depth, duration, sde,
+                        coverage_frac, n_obs, passed_all_gates, vet=vet,
+                    )
                     if PLOT_ALL:
                         plot_candidate(lc_search, tls_results, vet, tic_id,
                                         pass_suffix=f"pass{search_pass}" if search_pass > 1 else "")
@@ -843,6 +886,10 @@ if __name__ == "__main__":
                         print("  -> Vetting failed; not masking and stopping search passes.")
                         break
                 else:
+                    record_candidate_signal(
+                        tic_id, search_pass, period, tls_results.T0, depth, duration, sde,
+                        coverage_frac, n_obs, passed_all_gates,
+                    )
                     print("  -> Not masking - this result didn't pass the basic gates, so it "
                           "shouldn't get to delete data from the residual search.")
                     break
