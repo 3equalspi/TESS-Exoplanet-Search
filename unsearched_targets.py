@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Build a de-duplicated queue of TESS targets worth transit vetting (not planet detections)."""
 from __future__ import annotations
 import argparse, ast, os, re, tempfile
 from datetime import datetime, timezone
@@ -34,7 +33,6 @@ def download_once(url, filename, session=None, timeout=180):
     return path
 
 def tic_id(value):
-    """Canonicalize a TIC identifier, or return None for non-TIC values."""
     if value is None or pd.isna(value):
         return None
     match = re.search(r"(?:TIC\s*)?(\d{5,})", str(value), flags=re.IGNORECASE)
@@ -50,7 +48,6 @@ def find_tic_column(frame):
     return columns[0]
 
 def load_ids(path):
-    """Load TIC IDs from a CSV or newline-delimited text file."""
     path = Path(path)
     if not path.exists():
         return set()
@@ -61,7 +58,6 @@ def load_ids(path):
         return ids_from_values(path.read_text(encoding="utf-8").splitlines())
 
 def load_target_list(path=ROOT / "tess_search.py"):
-    """Read TARGET_LIST without importing the search pipeline's heavy dependencies."""
     path = Path(path)
     if not path.exists():
         return set()
@@ -106,7 +102,6 @@ def load_confirmed_tess_planets():
     return ids_from_values(frame[find_tic_column(frame)])
 
 def load_spoc_observed_ids():
-    """Fetch TICs with released TESS-SPOC time-series observations from MAST."""
     from astroquery.mast import Observations
     observations = Observations.query_criteria(
         obs_collection="TESS", dataproduct_type="timeseries", provenance_name="SPOC")
@@ -116,7 +111,6 @@ def load_spoc_observed_ids():
 
 def select_candidates(tce_frame, observed_ids, excluded_ids,
                       mes_min=MES_MIN, mes_max=MES_MAX, limit=None):
-    """Union eligible TCE and observed TICs, retaining the previous MES bounds."""
     eligible = tce_frame.copy()
     if "mes" in eligible.columns:
         mes = pd.to_numeric(eligible["mes"], errors="coerce")
@@ -135,7 +129,6 @@ def atomic_csv(frame, path):
     temporary.replace(path)
 
 def append_emitted(path, identifiers):
-    """Persist IDs returned so future runs advance to not-yet-emitted TICs."""
     path = Path(path)
     existing = load_ids(path)
     new = sorted(set(identifiers) - existing, key=int)
