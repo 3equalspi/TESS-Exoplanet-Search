@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import sys
 import glob
@@ -18,6 +19,10 @@ class StepTimeout(Exception):
 
 @contextmanager
 def time_limit(seconds, label="step"):
+    # SIGALRM is unavailable on Windows; continue without a hard timeout there.
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
     def _handler(signum, frame):
         raise StepTimeout(f"{label} exceeded its {seconds//60:.0f}-minute budget")
     old_handler = signal.signal(signal.SIGALRM, _handler)
@@ -700,6 +705,24 @@ def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
 # -----------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------
+def load_targets_file(path):
+    """Read a selector CSV with tic_id or a plain one-TIC-per-line list."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        if "," in sample:
+            reader = csv.DictReader(f)
+            column = next((c for c in (reader.fieldnames or [])
+                           if c and c.strip().lower().replace("_", " ") in ("tic id", "tic", "ticid")), None)
+            values = [row.get(column, "") for row in reader] if column else []
+        else:
+            values = [line.strip() for line in f if line.strip()]
+    targets = []
+    for value in values:
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if digits and int(digits) > 0:
+            targets.append(int(digits))
+    return list(dict.fromkeys(targets))
 RESULTS_LOG = os.path.join(CACHE_DIR, "processed_targets.csv")
 CANDIDATE_LOG = os.path.join(CACHE_DIR, "candidate_signals.csv")
 
@@ -752,11 +775,17 @@ def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration,
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Search TESS light curves for transit-like signals.")
+    parser.add_argument("--targets-file", help="CSV with tic_id or one TIC ID per line")
+    parser.add_argument("--limit", type=int, default=0, help="Maximum targets to process")
+    args = parser.parse_args()
+    selected_targets = load_targets_file(args.targets_file) if args.targets_file else TARGET_LIST
+    if args.limit > 0:
+        selected_targets = selected_targets[:args.limit]
     processed = load_processed()
-    remaining = [t for t in TARGET_LIST if str(t) not in processed]
-    print(f"Searching {len(TARGET_LIST)} stars "
+    remaining = [t for t in selected_targets if str(t) not in processed]
+    print(f"Searching {len(selected_targets)} stars "
           f"({len(processed)} already done in a previous run, {len(remaining)} remaining).\n")
-
     for i, tic_id in enumerate(remaining):
         if i > 0:
             time.sleep(3)
@@ -897,3 +926,4 @@ if __name__ == "__main__":
             mark_processed(tic_id)
 
     print("\nDone.")
+
