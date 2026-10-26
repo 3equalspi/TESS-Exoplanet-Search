@@ -2,6 +2,7 @@
 import argparse
 import csv
 import hashlib
+from itertools import chain
 import re
 import os
 import time
@@ -42,11 +43,22 @@ def download_once(url, fname, session=None, timeout=180):
     session = session or _session_with_retries()
     print(f"  -> Downloading {url}")
     t0 = time.time()
-    response = session.get(url, timeout=timeout)
+    response = session.get(url, timeout=timeout, stream=True)
     response.raise_for_status()
-    with open(path, "wb") as f:
-        f.write(response.content)
-    print(f"  -> Saved {path} ({len(response.content)/1e6:.1f} MB, {time.time()-t0:.1f}s)")
+    temporary_path = f"{path}.part"
+    byte_count = 0
+    try:
+        with open(temporary_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    byte_count += len(chunk)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+        response.close()
+    print(f"  -> Saved {path} ({byte_count/1e6:.1f} MB, {time.time()-t0:.1f}s)")
     return path
 
 
@@ -67,36 +79,69 @@ def tce_catalog_urls(index_html):
     return sorted({urljoin(TCE_INDEX_URL, href) for href in hrefs})
 
 
-def load_tce_catalog(session):
-    """Load every SPOC TCE stats CSV linked by MAST's live bulk-download index."""
+def _load_tce_urls(session):
     response = session.get(TCE_INDEX_URL, timeout=60)
     response.raise_for_status()
     urls = tce_catalog_urls(response.text)
     if not urls:
         raise RuntimeError("MAST TCE index returned no TCE statistics CSV links; refusing an incomplete screen")
+    return urls
+
+
+def load_tce_catalog(session):
+    """Load compact TIC/MES columns from MAST's live TCE index in chunks."""
     frames = []
-    for url in urls:
+    for url in _load_tce_urls(session):
         path = download_once(url, url.rsplit("/", 1)[-1], session)
-        df = pd.read_csv(path, comment="#")
-        tic_col = find_tic_column(df)
-        df = df.rename(columns={tic_col: "tic_id"})
-        mes_col = next((c for c in df.columns if "mes" in c.lower() or "mult_ev" in c.lower()), None)
-        if mes_col and mes_col != "mes":
-            df = df.rename(columns={mes_col: "mes"})
-        frames.append(df)
+        columns = list(pd.read_csv(path, comment="#", nrows=0).columns)
+        tic_col = find_tic_column(pd.DataFrame(columns=columns))
+        mes_col = next((c for c in columns if "mes" in c.lower() or "mult_ev" in c.lower()), None)
+        usecols = [tic_col] + ([mes_col] if mes_col and mes_col != tic_col else [])
+        for frame in pd.read_csv(path, comment="#", usecols=usecols, chunksize=250_000):
+            frame = frame.rename(columns={tic_col: "tic_id"})
+            if mes_col and mes_col != "mes":
+                frame = frame.rename(columns={mes_col: "mes"})
+            frames.append(frame)
     return pd.concat(frames, ignore_index=True).drop_duplicates()
 
 
+def load_tce_tic_ids(session, candidate_tics=None):
+    """Collect TCE TIC IDs incrementally without retaining full catalog tables."""
+    tic_ids = set()
+    candidate_tics = set(map(str, candidate_tics)) if candidate_tics is not None else None
+    for url in _load_tce_urls(session):
+        path = download_once(url, url.rsplit("/", 1)[-1], session)
+        columns = list(pd.read_csv(path, comment="#", nrows=0).columns)
+        tic_col = find_tic_column(pd.DataFrame(columns=columns))
+        for frame in pd.read_csv(path, comment="#", usecols=[tic_col], chunksize=250_000):
+            chunk_tics = set(clean_tics(frame[tic_col]).tolist())
+            tic_ids.update(chunk_tics if candidate_tics is None else chunk_tics.intersection(candidate_tics))
+    return tic_ids
+
+
+def iter_atlas_variable_chunks(path, chunk_size=250_000):
+    """Yield only ATLAS-VAR RA/Dec columns from a memory-mapped FITS table."""
+    from astropy.io import fits
+    with fits.open(path, memmap=True, lazy_load_hdus=True) as hdus:
+        table_hdu = next((hdu for hdu in hdus[1:] if getattr(hdu, "columns", None)), None)
+        if table_hdu is None:
+            raise ValueError("ATLAS-VAR FITS file contains no binary table")
+        names = table_hdu.columns.names
+        ra_col = next((c for c in names if c.lower() in {"ra", "raj2000"}), None)
+        dec_col = next((c for c in names if c.lower() in {"dec", "dej2000"}), None)
+        if not ra_col or not dec_col:
+            raise ValueError(f"ATLAS-VAR table has no RA/Dec columns: {names}")
+        data = table_hdu.data
+        for start in range(0, len(data), chunk_size):
+            end = min(start + chunk_size, len(data))
+            yield pd.DataFrame({"ra": np.asarray(data[ra_col][start:end]),
+                                "dec": np.asarray(data[dec_col][start:end])})
+
+
 def load_atlas_variable_catalog(session):
-    """Return ATLAS-VAR DR1 positions (4.7M published variable candidates)."""
+    """Return an iterator over memory-bounded chunks of ATLAS-VAR positions."""
     path = download_once(ATLAS_VAR_URL, "atlas_var_dr1_object.fits", session, timeout=300)
-    from astropy.table import Table
-    frame = Table.read(path, hdu=1).to_pandas()
-    ra_col = next((c for c in frame.columns if c.lower() in {"ra", "raj2000"}), None)
-    dec_col = next((c for c in frame.columns if c.lower() in {"dec", "dej2000"}), None)
-    if not ra_col or not dec_col:
-        raise ValueError(f"ATLAS-VAR table has no RA/Dec columns: {list(frame.columns)}")
-    return frame.rename(columns={ra_col: "ra", dec_col: "dec"})[["ra", "dec"]]
+    return iter_atlas_variable_chunks(path)
 
 
 def load_toi_catalog(session):
@@ -214,84 +259,69 @@ def select_qlp_candidates(targets, excluded_tics, seen_tics, limit=0, min_sector
 
 
 def coordinate_matched_tics(targets, catalogs, radius_arcsec=10.0):
-    """Return TICs near catalog positions using chunked spherical matching."""
+    """Match catalog positions in chunks without concatenating large tables."""
     if targets.empty or not {"ra", "dec"}.issubset(targets.columns):
         return set()
-    catalog_parts = []
-    for frame in catalogs:
-        if frame is None or frame.empty:
-            continue
-        ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
-        dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
-        if ra_col and dec_col:
-            part = frame[[ra_col, dec_col]].copy()
-            part.columns = ["ra", "dec"]
-            catalog_parts.append(part)
-    if not catalog_parts:
-        return set()
-    catalog = pd.concat(catalog_parts, ignore_index=True)
-    catalog["ra"] = pd.to_numeric(catalog["ra"], errors="coerce")
-    catalog["dec"] = pd.to_numeric(catalog["dec"], errors="coerce")
-    catalog = catalog.dropna()
-    catalog = catalog[catalog.ra.between(0.0, 360.0) & catalog.dec.between(-90.0, 90.0)]
-    if catalog.empty:
-        return set()
-
     target_ra = pd.to_numeric(targets.ra, errors="coerce").to_numpy(dtype=float)
     target_dec = pd.to_numeric(targets.dec, errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(target_ra) & np.isfinite(target_dec) & (target_ra >= 0) & (target_ra <= 360) & (target_dec >= -90) & (target_dec <= 90)
     valid_idx = np.flatnonzero(valid)
     if not len(valid_idx):
         return set()
+    matched = set()
     try:
         import astropy.units as u
         from astropy.coordinates import SkyCoord
         target_coords = SkyCoord(ra=target_ra[valid_idx] * u.deg, dec=target_dec[valid_idx] * u.deg)
-        matched_targets = set()
-        # Chunk the 4.7M-row ATLAS catalog to keep memory use bounded.
-        for start in range(0, len(catalog), 250_000):
-            part = catalog.iloc[start:start + 250_000]
-            catalog_coords = SkyCoord(ra=part.ra.to_numpy(dtype=float) * u.deg,
-                                      dec=part.dec.to_numpy(dtype=float) * u.deg)
-            # SkyCoord.search_around_sky returns indices into its argument
-            # first, then indices into self (the target coordinates here).
-            _, target_idx, _, _ = target_coords.search_around_sky(
-                catalog_coords, radius_arcsec * u.arcsec
-            )
+        for frame in catalogs:
+            if frame is None or frame.empty:
+                continue
+            ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
+            dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
+            if not ra_col or not dec_col:
+                continue
+            ra = pd.to_numeric(frame[ra_col], errors="coerce").to_numpy(dtype=float)
+            dec = pd.to_numeric(frame[dec_col], errors="coerce").to_numpy(dtype=float)
+            good = np.isfinite(ra) & np.isfinite(dec) & (ra >= 0) & (ra <= 360) & (dec >= -90) & (dec <= 90)
+            if not np.any(good):
+                continue
+            catalog_coords = SkyCoord(ra=ra[good] * u.deg, dec=dec[good] * u.deg)
+            _, target_idx, _, _ = target_coords.search_around_sky(catalog_coords, radius_arcsec * u.arcsec)
             if len(target_idx):
-                matched_targets.update(targets.iloc[valid_idx[np.unique(target_idx)]]["tic_id"].astype(str))
-                if len(matched_targets) == len(set(targets.iloc[valid_idx]["tic_id"].astype(str))):
-                    break
-        return matched_targets
+                matched.update(targets.iloc[valid_idx[np.unique(target_idx)]]["tic_id"].astype(str))
+        return matched
     except ImportError:
-        # Keep a dependency-light fallback for small catalogs and unit tests.
-        if len(catalog) > 100_000:
-            raise RuntimeError("Large-catalog coordinate screening requires SciPy; install the project dependencies")
-
+        # A one-shot iterator cannot be replayed by the small-catalog fallback.
+        if iter(catalogs) is catalogs:
+            raise RuntimeError("Coordinate screening requires Astropy for streamed catalogs; install the project dependencies")
+        if sum(len(frame) for frame in catalogs if frame is not None) > 100_000:
+            raise RuntimeError("Large-catalog coordinate screening requires Astropy; install the project dependencies")
     order = valid_idx[np.argsort(target_dec[valid_idx])]
-    sorted_dec = target_dec[order]
-    sorted_ra = target_ra[order]
+    sorted_dec, sorted_ra = target_dec[order], target_ra[order]
     sorted_tics = targets.iloc[order]["tic_id"].astype(str).to_numpy()
     radius_deg = radius_arcsec / 3600.0
     radius_rad = np.deg2rad(radius_deg)
-    matched = set()
-    for ra0, dec0 in catalog[["ra", "dec"]].itertuples(index=False, name=None):
-        lo = np.searchsorted(sorted_dec, dec0 - radius_deg, side="left")
-        hi = np.searchsorted(sorted_dec, dec0 + radius_deg, side="right")
-        if hi <= lo:
+    for frame in catalogs:
+        if frame is None or frame.empty:
             continue
-        ras, decs, tics = sorted_ra[lo:hi], sorted_dec[lo:hi], sorted_tics[lo:hi]
-        cos_dec = max(abs(np.cos(np.deg2rad(dec0))), 1e-8)
-        ra_window = min(180.0, radius_deg / cos_dec)
-        delta_ra = np.abs((ras - ra0 + 180.0) % 360.0 - 180.0)
-        near = delta_ra <= ra_window
-        if not np.any(near):
+        rac = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
+        decc = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
+        if not rac or not decc:
             continue
-        ras, decs, tics = ras[near], decs[near], tics[near]
-        dra = np.deg2rad((ras - ra0 + 180.0) % 360.0 - 180.0)
-        ddec = np.deg2rad(decs - dec0)
-        hav = np.sin(ddec / 2.0) ** 2 + np.cos(np.deg2rad(dec0)) * np.cos(np.deg2rad(decs)) * np.sin(dra / 2.0) ** 2
-        matched.update(tics[2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0))) <= radius_rad])
+        catalog = pd.DataFrame({"ra": pd.to_numeric(frame[rac], errors="coerce"), "dec": pd.to_numeric(frame[decc], errors="coerce")}).dropna()
+        catalog = catalog[catalog.ra.between(0, 360) & catalog.dec.between(-90, 90)]
+        for ra0, dec0 in catalog[["ra", "dec"]].itertuples(index=False, name=None):
+            lo = np.searchsorted(sorted_dec, dec0-radius_deg, side="left")
+            hi = np.searchsorted(sorted_dec, dec0+radius_deg, side="right")
+            if hi <= lo:
+                continue
+            ras, decs, tics = sorted_ra[lo:hi], sorted_dec[lo:hi], sorted_tics[lo:hi]
+            dra_deg = np.abs((ras-ra0+180.0) % 360.0-180.0)
+            near = dra_deg <= min(180.0, radius_deg/max(abs(np.cos(np.deg2rad(dec0))),1e-8))
+            dra = np.deg2rad((ras[near]-ra0+180.0)%360.0-180.0)
+            ddec = np.deg2rad(decs[near]-dec0)
+            hav = np.sin(ddec/2)**2 + np.cos(np.deg2rad(dec0))*np.cos(np.deg2rad(decs[near]))*np.sin(dra/2)**2
+            matched.update(tics[near][2*np.arcsin(np.sqrt(np.clip(hav,0,1))) <= radius_rad])
     return matched
 
 
@@ -368,11 +398,10 @@ def main():
         print(f"Loading public QLP target lists for sectors {sectors}...")
         pool = load_qlp_target_catalog(session, sectors)
         print("Loading all public SPOC TCE catalogs linked by MAST...")
-        tce = load_tce_catalog(session)
-        excluded |= set(clean_tics(tce["tic_id"]))
+        excluded |= load_tce_tic_ids(session, pool["tic_id"].astype(str))
         print("Loading ATLAS-VAR DR1 positions to remove previously cataloged variable stars...")
-        atlas_var = load_atlas_variable_catalog(session)
-        excluded |= coordinate_matched_tics(pool, [toi, confirmed, atlas_var], radius_arcsec=10.0)
+        atlas_var_chunks = load_atlas_variable_catalog(session)
+        excluded |= coordinate_matched_tics(pool, chain((toi, confirmed), atlas_var_chunks), radius_arcsec=10.0)
     else:
         print("Loading SPOC TCE catalog...")
         pool = load_tce_catalog(session)
@@ -394,3 +423,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
