@@ -145,9 +145,19 @@ def parse_sectors(spec):
 def load_qlp_target_catalog(session, sectors):
     """Load TICs with public QLP FFI light curves, grouped across sectors."""
     by_tic = {}
+    available_sectors = []
+    missing_sectors = []
     for sector in sectors:
         name = f"qlp_targets_s{sector:04d}.csv"
-        path = download_once(QLP_TARGET_LIST_URL.format(sector=sector), name, session)
+        try:
+            path = download_once(QLP_TARGET_LIST_URL.format(sector=sector), name, session)
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            missing_sectors.append(sector)
+            print(f"  -> QLP target list for Sector {sector} is not published at the expected URL (404); skipping that sector.")
+            continue
+        available_sectors.append(sector)
         # QLP's published sector target lists are headerless TIC, RA, Dec CSVs;
         # also accept a headered variant in case the archive format changes.
         frame = pd.read_csv(path, comment="#", header=None)
@@ -171,6 +181,10 @@ def load_qlp_target_catalog(session, sectors):
             if ra_col and dec_col:
                 entry["ra"] = pd.to_numeric(row[ra_col], errors="coerce")
                 entry["dec"] = pd.to_numeric(row[dec_col], errors="coerce")
+    if not available_sectors:
+        raise RuntimeError("None of the requested QLP sector target lists were available; no candidates were selected.")
+    if missing_sectors:
+        print(f"  -> Partial sector pool: using {available_sectors}; unavailable sectors: {missing_sectors}.")
     rows = [{"tic_id": tic, "sector_count": len(info["sectors"]),
              "sectors": ";".join(str(sector) for sector in sorted(info["sectors"])),
              "ra": info["ra"], "dec": info["dec"],
