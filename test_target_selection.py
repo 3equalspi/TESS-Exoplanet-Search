@@ -6,7 +6,7 @@ import pandas as pd
 from unsearched_targets import (
     select_candidates, select_qlp_candidates, parse_sectors,
     load_qlp_target_catalog, coordinate_matched_tics,
-    append_emitted_tics, read_seen_tics,
+    append_emitted_tics, read_seen_tics, tce_catalog_urls,
 )
 from vetting import primary_transit_passes
 
@@ -51,6 +51,15 @@ class TargetSelectionTests(unittest.TestCase):
         second = select_qlp_candidates(pool, set(), set()).tic_id.tolist()
         self.assertEqual(first, second)
         self.assertNotEqual(first, sorted(first))
+
+    def test_live_tce_index_finds_late_sector_and_multisector_products(self):
+        html = ('<a href="/missions/tess/catalogs/tce/a-s0001-s0001_dvr-tcestats.csv">S1</a>'
+                '<a href="b-s0097-s0097_dvr-tcestats.csv">S97</a>'
+                '<a href="c-s0001-s0096_dvr-tcestats.csv">multi</a>')
+        urls = tce_catalog_urls(html)
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(any("s0097-s0097" in url for url in urls))
+        self.assertTrue(any("s0001-s0096" in url for url in urls))
 
     def test_sector_ranges(self):
         self.assertEqual(parse_sectors("2,4-5,8"), [2, 4, 5, 8])
