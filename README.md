@@ -2,19 +2,27 @@
 
 A Python/lightkurve workflow for searching TESS SPOC light curves for transit-like signals. The search stores completed TIC IDs in `tess_lc_cache/processed_targets.csv` and detected signals in `tess_lc_cache/candidate_signals.csv`. The post-search review measures transit depth by sector and event, checks odd/even depth and possible secondary eclipses, and generates a review plot. These checks prioritize human review; they do not confirm planets.
 
-## Find and search fresh targets
+## Find fresh targets for independent transit vetting
 
 Install the packages used by the scripts (`lightkurve`, `astropy`, `transitleastsquares`, `pandas`, `matplotlib`, `requests`, and `astroquery`), then run:
 
 ```bash
-python unsearched_targets.py --limit 100
+python unsearched_targets.py --limit 500
 python tess_search.py --targets-file catalog_cache/undersearched_candidates.csv
 python post_search_vetting.py
 ```
 
-The selector draws from the archived SPOC TCE catalog, removes TICs in the TOI catalog and confirmed transiting planet hosts in the NASA Exoplanet Archive, and removes TICs already present in the processed or candidate-signal ledgers. It applies a conservative MES range of 7.5–20 when the TCE catalog provides MES, collapses multiple TCE rows to one TIC, and sorts stronger candidates first. The TCE catalog currently covers sectors 1–96, so this is an underreviewed-target list from that catalog, not a census of every TESS target or a guarantee that signals were never examined elsewhere.
+The selector now defaults to MAST's sector-by-sector QLP full-frame target lists, which cover far more stars than the archived SPOC TCE catalog. It removes TICs found in TOI, confirmed transiting-planet, or SPOC TCE catalogs; where coordinates are available it also cross-matches TOI/confirmed-host positions within 10 arcseconds to catch missing or inconsistent TIC cross-identifications. It also skips TICs in the processed, candidate-signal, and persistent emitted-target ledgers. Its default sectors are 97–98 and 105–107; sectors 99–104 are skipped because MAST currently flags timing corrections there. Choose other sectors with `--sectors 1-96` or `--sectors 40-60,70-75`. Each run emits up to 500 new TICs, ranked from fewer observed sectors toward more observed sectors, using sector count as a rough prioritization proxy. This favors targets with less TESS coverage while still letting you require multiple sectors.
 
-`--processed-file` and `--candidate-file` can point to alternate ledgers. `--output` changes the selector CSV path. `--limit` limits how many candidates are emitted. The searcher accepts either that CSV (`tic_id` column) or a plain list of TIC IDs. If `--targets-file` is omitted, the existing built-in `TARGET_LIST` is used. The searcher still skips any TIC already in its processed ledger.
+```bash
+python unsearched_targets.py --sectors 1-98,105-107 --min-sectors 2 --limit 1000
+```
+
+These are **catalog-unlisted targets**, not proof that a star has never appeared in a paper or been examined by a research group. QLP is a large survey pipeline, and archive searches cannot establish absence of all prior study. The filter aims to avoid already cataloged TESS signals and known planets, then gives your own search a large list of observed stars. The selector's source is [MAST's QLP archive](https://archive.stsci.edu/hlsp/qlp), which publishes per-sector TIC target lists and light curves. Use `--source tce` to retain the legacy SPOC-TCE selection; that pool is smaller and consists of targets already associated with a SPOC transit-like event.
+
+`--processed-file`, `--candidate-file`, and `--emitted-file` can point to alternate ledgers. `--output` changes the selected-target CSV. The selector writes emitted TICs to `tess_lc_cache/emitted_targets.csv` by default, so later runs do not repeat earlier batches. The searcher uses SPOC light curves when present and falls back to QLP FFI light curves when the target is not in SPOC's short-cadence target list. It still skips completed TICs in `tess_lc_cache/processed_targets.csv`.
+
+The initial search may still report no signal or noisy plots for most targets; that is normal for a transit search, and a TESS light curve alone does not establish a planet. TLS analysis no longer applies an extra 60,000-point binning step after the initial cap. A signal is not automatically marked as passed unless the folded primary dip is positive, significant, agrees with the TLS depth, and the cadence is at least twice as fine as the fitted transit duration. Short or under-sampled signals are failed/inconclusive for automated triage and need a higher-cadence light curve or manual review.
 
 ## Review and benchmarks
 
@@ -25,4 +33,3 @@ python benchmark_transit_search.py --injections 10 --controls 10
 ```
 
 The review plot now includes a local BLS period scan around the recorded period, alongside folded light curves, sector depths, and per-event depths. The synthetic benchmark reports recovery for injected box-shaped transits and peak power on noise-only controls. It is a reproducible algorithm/code check, not an estimate of real-world planet yield or a calibrated false-positive rate. Candidates remain targets worth vetting, not planet claims.
-
