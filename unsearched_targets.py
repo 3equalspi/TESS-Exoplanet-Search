@@ -257,7 +257,7 @@ def main():
     parser = argparse.ArgumentParser(description="Select catalog-unlisted TESS targets with public QLP light curves.")
     parser.add_argument("--source", choices=["qlp", "tce"], default="qlp",
                         help="QLP observed-target pool (default) or legacy SPOC TCE pool")
-    parser.add_argument("--sectors", default="97-98,105-107",
+    parser.add_argument("--sectors", default="97-98",
                         help="QLP sectors as numbers/ranges; default skips sectors 99-104 with timing corrections")
     parser.add_argument("--min-sectors", type=int, default=1,
                         help="Require this many QLP sectors for each TIC")
