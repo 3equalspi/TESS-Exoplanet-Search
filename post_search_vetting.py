@@ -8,6 +8,7 @@ from pathlib import Path
 import lightkurve as lk
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.timeseries import BoxLeastSquares
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -144,7 +145,17 @@ def review(row, cache, output):
     if not flags:
         flags = ["no_automatic_flags"]
 
-    fig, ax = plt.subplots(4, 1, figsize=(13, 12), constrained_layout=True)
+    # Local BLS scan checks whether nearby aliases rival the recorded period. It is diagnostic, not a new verdict.
+    local_periods = np.linspace(max(0.5, period * 0.8), min(20.0, period * 1.2), 241)
+    try:
+        local_power = BoxLeastSquares(t, y).power(local_periods, duration=[min(duration, period * 0.2)])
+        best_local = int(np.nanargmax(local_power.power))
+        local_best_period = float(local_power.period[best_local])
+        local_best_power = float(local_power.power[best_local])
+    except Exception:
+        local_power, local_best_period, local_best_power = None, np.nan, np.nan
+
+    fig, ax = plt.subplots(5, 1, figsize=(13, 15), constrained_layout=True)
     ax[0].plot(t, y, "k.", ms=1, alpha=.4)
     for center in epoch + np.arange(k0, k1 + 1) * period:
         ax[0].axvline(center, color="tab:red", alpha=.2, lw=.6)
@@ -154,18 +165,25 @@ def review(row, cache, output):
     ax[1].set_xlim(-2 * duration / period, 2 * duration / period)
     ax[1].set(ylabel="Normalized flux", xlabel="Orbital phase")
     ax[1].set_title("All sectors folded on search ephemeris")
+    if local_power is not None:
+        ax[2].plot(local_power.period, local_power.power, color="tab:blue")
+        ax[2].axvline(period, color="tab:red", ls="--", label="Search period")
+        ax[2].axvline(local_best_period, color="tab:green", ls=":", label="Local peak")
+        ax[2].legend()
+    ax[2].set(xlabel="Period (days)", ylabel="BLS power")
+    ax[2].set_title(f"Local period scan; best={local_best_period:.6f} d")
     xx = np.arange(len(sd))
-    ax[2].axhline(0, color=".5", lw=.8)
-    ax[2].plot(xx, np.asarray(sd) * 1e3, "o-")
-    ax[2].set_xticks(xx, sector_ids, rotation=45)
-    ax[2].set(ylabel="Depth (ppt)", xlabel="TESS sector")
-    ax[2].set_title("Independent sector depth estimates")
     ax[3].axhline(0, color=".5", lw=.8)
+    ax[3].plot(xx, np.asarray(sd) * 1e3, "o-")
+    ax[3].set_xticks(xx, sector_ids, rotation=45)
+    ax[3].set(ylabel="Depth (ppt)", xlabel="TESS sector")
+    ax[3].set_title("Independent sector depth estimates")
+    ax[4].axhline(0, color=".5", lw=.8)
     if len(depths):
-        ax[3].scatter(np.arange(len(depths)), depths * 1e3,
+        ax[4].scatter(np.arange(len(depths)), depths * 1e3,
                       c=np.asarray(event_cycles) % 2, cmap="coolwarm", s=24)
-    ax[3].set(ylabel="Depth (ppt)", xlabel="Observed event sequence")
-    ax[3].set_title("Individual event depths (alternating colors)")
+    ax[4].set(ylabel="Depth (ppt)", xlabel="Observed event sequence")
+    ax[4].set_title("Individual event depths (alternating colors)")
     output.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", f"TIC{tic}_pass{row['search_pass']}_P{period:.6f}")
     plot = output / f"{safe}_review.png"
@@ -177,6 +195,7 @@ def review(row, cache, output):
         "sectors_downloaded": len(sectors), "transits_measured": len(depths),
         "median_transit_depth": median_depth, "transit_depth_scatter": event_scatter,
         "sector_depth_scatter": scatter_sector, "odd_even_relative_difference": odd_even,
+        "local_bls_best_period_days": local_best_period, "local_bls_peak_power": local_best_power,
         "secondary_depth": secondary_depth, "review_flags": ";".join(flags),
         "plot_path": str(plot), "error": "",
     }
@@ -214,7 +233,8 @@ def main():
         except Exception as exc:
             result = {name: "" for name in ("sectors_downloaded", "transits_measured",
                       "median_transit_depth", "transit_depth_scatter", "sector_depth_scatter",
-                      "odd_even_relative_difference", "secondary_depth", "review_flags", "plot_path")}
+                      "odd_even_relative_difference", "local_bls_best_period_days", "local_bls_peak_power",
+                      "secondary_depth", "review_flags", "plot_path")}
             result.update({"tic_id": row["tic_id"], "search_pass": row["search_pass"],
                            "period_days": row["period_days"], "epoch_btjd": row["epoch_btjd"],
                            "duration_hours": row["duration_days"] * 24, "sde": row["sde"],
@@ -224,7 +244,7 @@ def main():
         fields = ["tic_id", "search_pass", "period_days", "epoch_btjd", "duration_hours", "sde",
                   "sectors_downloaded", "transits_measured", "median_transit_depth",
                   "transit_depth_scatter", "sector_depth_scatter", "odd_even_relative_difference",
-                  "secondary_depth", "review_flags", "plot_path", "error"]
+                  "local_bls_best_period_days", "local_bls_peak_power", "secondary_depth", "review_flags", "plot_path", "error"]
         header = not summary.exists() or summary.stat().st_size == 0
         with open(summary, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -236,3 +256,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
