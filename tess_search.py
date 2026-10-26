@@ -674,8 +674,8 @@ def vet_candidate(lc, tls_results):
         )
 
     print(
-        f"     vetting: "
-        f"{'PASSED' if passed else 'FAILED'}",
+        f"     internal transit-shape screen: "
+        f"{'PASSED' if passed else 'FAILED'} (novelty not checked)",
         flush=True,
     )
 
@@ -726,7 +726,7 @@ def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
     axes[1].set_xlabel("Phase")
     axes[1].set_ylabel("Normalised flux")
     axes[1].set_xlim(-2*duration/period, 2*duration/period)
-    axes[1].set_title(f"Folded transit (vet passed = {vet['passed']})")
+    axes[1].set_title(f"Folded transit (internal screen passed = {vet['passed']}; novelty unchecked)")
     plt.tight_layout()
     os.makedirs(SAVE_DIR, exist_ok=True)
     fname_suffix = f"_{pass_suffix.replace(' ', '')}" if pass_suffix else ""
@@ -777,7 +777,28 @@ def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration,
     fields = ["tic_id", "search_pass", "period_days", "epoch_btjd", "depth",
               "duration_days", "sde", "coverage_fraction", "observed_transits",
               "basic_gates_passed", "initial_vet_passed", "initial_vet_resolvable",
+              "internal_transit_shape_passed", "novelty_status", "planet_status",
               "odd_even_diff", "secondary_depth"]
+    # Extend older candidate logs without discarding rows or misaligning CSV columns.
+    if os.path.exists(CANDIDATE_LOG):
+        try:
+            with open(CANDIDATE_LOG, newline="", encoding="utf-8-sig") as existing:
+                reader = csv.DictReader(existing)
+                old_fields = reader.fieldnames or []
+                old_rows = list(reader)
+            if any(field not in old_fields for field in fields):
+                tmp_path = CANDIDATE_LOG + ".tmp"
+                with open(tmp_path, "w", newline="", encoding="utf-8") as migrated:
+                    writer = csv.DictWriter(migrated, fieldnames=fields)
+                    writer.writeheader()
+                    for old_row in old_rows:
+                        old_row.setdefault("internal_transit_shape_passed", old_row.get("initial_vet_passed", ""))
+                        old_row.setdefault("novelty_status", "NOT_CHECKED")
+                        old_row.setdefault("planet_status", "NOT_ESTABLISHED")
+                        writer.writerow({field: old_row.get(field, "") for field in fields})
+                os.replace(tmp_path, CANDIDATE_LOG)
+        except (OSError, csv.Error) as exc:
+            raise RuntimeError(f"Could not safely update candidate log schema at {CANDIDATE_LOG}: {exc}") from exc
     key = (str(tic_id), str(search_pass), f"{float(period):.6f}")
     if os.path.exists(CANDIDATE_LOG):
         try:
@@ -796,6 +817,9 @@ def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration,
         "basic_gates_passed": bool(basic_gates_passed),
         "initial_vet_passed": vet.get("passed", "") if vet else "",
         "initial_vet_resolvable": vet.get("resolvable", "") if vet else "",
+        "internal_transit_shape_passed": vet.get("passed", "") if vet else "",
+        "novelty_status": "NOT_CHECKED",
+        "planet_status": "NOT_ESTABLISHED",
         "odd_even_diff": vet.get("odd_even_diff", "") if vet else "",
         "secondary_depth": vet.get("secondary_depth", "") if vet else "",
     }
@@ -924,10 +948,11 @@ if __name__ == "__main__":
                     if vet["resolvable"]:
                         print(f"  -> Odd/even diff: {vet['odd_even_diff']:.2f}, "
                               f"Secondary depth: {vet['secondary_depth']*1e3:.2f} ppt")
-                        print(f"  -> Vetting {'PASSED' if vet['passed'] else 'FAILED'}")
+                        print(f"  -> Internal transit-shape screen {'PASSED' if vet['passed'] else 'FAILED'}; catalog/literature novelty is not checked.")
                     else:
-                        print("  -> Vetting INCONCLUSIVE - transit too narrow relative to the "
-                              "phase-folded bins to resolve odd/even or secondary-eclipse depth.")
+                        print("  -> Internal screen INCONCLUSIVE - transit too narrow relative to the "
+                              "phase-folded bins to resolve odd/even or secondary-eclipse depth. "
+                              "Catalog/literature novelty is not checked.")
                     record_candidate_signal(
                         tic_id, search_pass, period, tls_results.T0, depth, duration, sde,
                         coverage_frac, n_obs, passed_all_gates, vet=vet,
