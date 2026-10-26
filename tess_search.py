@@ -60,7 +60,7 @@ BLS_PEAK_SNR_MIN = 6.0
 BLS_N_PERIODS = 15_000
 MASK_AND_RESEARCH_PASSES = 3
 CACHE_DIR = "tess_lc_cache"
-SAVE_DIR = "/home/life/hail_mary"
+SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
 PLOT_ALL = True
 BLS_TIMEOUT_S = 10 * 60
 TLS_TIMEOUT_S = 40 * 60
@@ -73,29 +73,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # Your target list
 # -----------------------------------------------------------------
 TARGET_LIST = [
-    25117273,
-    30537037,
-    32089054,
-    32152605,
-    37302368,
-    38846471,
-    41232189,
-    41483281,
-    55557836,
-    65541415,
-    140757590,
-    140938247,
-    141412532,
-    141770047,
-    149120276,
-    149154927,
-    149542947,
-    150066631,
-    150100627,
-    150165657,
-    150441015,
-    167344197,
-    177082055
+
 ]
 
 # -----------------------------------------------------------------
