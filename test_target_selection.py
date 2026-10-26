@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
+import requests
 import pandas as pd
 
 from unsearched_targets import (
@@ -80,6 +82,35 @@ class TargetSelectionTests(unittest.TestCase):
             for item in tmp.iterdir():
                 item.unlink()
             tmp.rmdir()
+
+    def test_qlp_loader_skips_only_unpublished_sector_lists(self):
+        tmp = Path(".test_qlp_partial_cache")
+        tmp.mkdir(exist_ok=True)
+        sector1 = tmp / "qlp_targets_s0001.csv"
+        sector1.write_text("101,10,20\n", encoding="utf-8")
+        def download(url, name, session):
+            if "s0002" in name:
+                error = requests.HTTPError("404")
+                error.response = SimpleNamespace(status_code=404)
+                raise error
+            return str(sector1)
+        try:
+            with patch("unsearched_targets.CACHE_DIR", str(tmp)):
+                with patch("unsearched_targets.download_once", side_effect=download):
+                    merged = load_qlp_target_catalog(session=object(), sectors=[1, 2])
+            self.assertEqual(merged.tic_id.tolist(), ["101"])
+            self.assertEqual(merged.iloc[0].sectors, "1")
+        finally:
+            for item in tmp.iterdir():
+                item.unlink()
+            tmp.rmdir()
+
+    def test_qlp_loader_fails_if_every_requested_sector_is_missing(self):
+        error = requests.HTTPError("404")
+        error.response = SimpleNamespace(status_code=404)
+        with patch("unsearched_targets.download_once", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "None of the requested"):
+                load_qlp_target_catalog(session=object(), sectors=[106])
 
     def test_coordinate_crossmatch_catches_catalog_host(self):
         targets = pd.DataFrame({"tic_id": ["123", "456"], "ra": [10.0, 20.0], "dec": [5.0, 5.0]})
