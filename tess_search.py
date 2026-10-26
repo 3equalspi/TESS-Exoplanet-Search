@@ -732,8 +732,8 @@ def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
     fname_suffix = f"_{pass_suffix.replace(' ', '')}" if pass_suffix else ""
     fname = os.path.join(SAVE_DIR, f"TIC{tic_id}{fname_suffix}_candidate.png")
     plt.savefig(fname, dpi=150, bbox_inches='tight')
+    plt.close(fig)
     print(f"  -> Plot saved to {fname}")
-    plt.show()
 
 # -----------------------------------------------------------------
 # Main
