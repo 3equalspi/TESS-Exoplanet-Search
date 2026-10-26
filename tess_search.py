@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import lightkurve as lk
 from astropy.timeseries import BoxLeastSquares
 from transitleastsquares import transitleastsquares
+from vetting import primary_transit_passes
 
 class StepTimeout(Exception):
     pass
@@ -47,7 +48,8 @@ MIN_TRANSIT_COVERAGE_FRAC = 0.2
 SHORT_LONG_SPLIT_DAYS = 3.0
 SHORT_REGIME_DURATIONS = np.linspace(0.02, 0.3, 8)
 LONG_REGIME_DURATIONS = np.linspace(0.1, 0.3, 5)
-TLS_MAX_POINTS = 60_000
+# Avoid an unnecessary coarse second bin before TLS.
+TLS_MAX_POINTS = MAX_POINTS
 TLS_OVERSAMPLING_FACTOR = 1
 QUALITY_BITMASK = "hard"
 MAX_MEAN_FLUX_DEVIATION = 0.01
@@ -131,11 +133,17 @@ def get_stitched_lc(tic_id):
             suffix = f" (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})" if attempt > 1 else ""
             print(f"  -> Searching MAST...{suffix}", flush=True)
             search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC")
+            source = "SPOC"
             if len(search) == 0:
-                print(f"  -> No SPOC data for TIC {tic_id}")
+                # QLP FFI light curves cover many more stars than the SPOC
+                # short-cadence target list and power the expanded target pool.
+                search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP")
+                source = "QLP"
+            if len(search) == 0:
+                print(f"  -> No SPOC or QLP data for TIC {tic_id}")
                 return None
 
-            print(f"  -> Downloading {len(search)} sector(s)...", flush=True)
+            print(f"  -> Downloading {len(search)} {source} sector(s)...", flush=True)
             t0 = time.time()
             with time_limit(DOWNLOAD_STEP_TIMEOUT_S, "download"):
                 lc_coll = search.download_all(download_dir=CACHE_DIR, quality_bitmask=QUALITY_BITMASK)
@@ -375,7 +383,8 @@ def vet_candidate(lc, tls_results):
     epoch = float(tls_results.T0)
     duration = float(tls_results.duration)
     depth = 1.0 - float(tls_results.depth)
-
+    cadence_days = float(np.nanmedian(np.diff(np.asarray(lc.time.value, dtype=float))))
+    cadence_resolved = bool(np.isfinite(cadence_days) and cadence_days <= duration / 2.0)
 
     if (
         not np.isfinite(period)
@@ -396,6 +405,10 @@ def vet_candidate(lc, tls_results):
             "secondary_ok": False,
             "passed": False,
             "resolvable": False,
+            "cadence_days": cadence_days,
+            "cadence_resolved": False,
+            "primary_depth": np.nan,
+            "primary_ok": False,
         }
 
     MIN_BINS_ACROSS_TRANSIT = 6
@@ -452,6 +465,10 @@ def vet_candidate(lc, tls_results):
             "secondary_ok": False,
             "passed": False,
             "resolvable": False,
+            "cadence_days": cadence_days,
+            "cadence_resolved": False,
+            "primary_depth": np.nan,
+            "primary_ok": False,
         }
 
     phase_2x = (
@@ -508,6 +525,15 @@ def vet_candidate(lc, tls_results):
             median_out
             - np.median(flux_2x[primary_mask])
         )
+        # Flat/noise-only folds fail even if odd/even and secondary checks are
+        # trivially consistent. Compare primary depth with TLS and local scatter.
+        scatter_out = 1.4826 * np.median(np.abs(flux_2x[outside_mask] - median_out))
+        n_primary_bins = int(np.sum(primary_mask))
+        primary_ok = primary_transit_passes(
+            measured_depth=depth_even, fitted_depth=depth,
+            out_of_transit_scatter=scatter_out, n_primary_bins=n_primary_bins,
+            cadence_days=cadence_days, duration_days=duration,
+        )
 
         if np.any(secondary_mask_2x):
 
@@ -541,6 +567,7 @@ def vet_candidate(lc, tls_results):
         depth_odd = np.nan
         odd_even_diff = np.nan
         odd_even_ok = False
+        primary_ok = False
     phase_1x = (
         (time - epoch) / period
     )
@@ -605,6 +632,8 @@ def vet_candidate(lc, tls_results):
 
     passed = (
         resolvable
+        and cadence_resolved
+        and primary_ok
         and odd_even_ok
         and secondary_ok
     )
@@ -661,6 +690,10 @@ def vet_candidate(lc, tls_results):
         "secondary_ok": secondary_ok,
         "passed": passed,
         "resolvable": resolvable,
+        "cadence_days": cadence_days,
+        "cadence_resolved": cadence_resolved,
+        "primary_depth": depth_even,
+        "primary_ok": primary_ok,
     }
 
 def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
@@ -926,4 +959,3 @@ if __name__ == "__main__":
             mark_processed(tic_id)
 
     print("\nDone.")
-
