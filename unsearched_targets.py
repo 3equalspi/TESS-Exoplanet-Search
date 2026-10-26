@@ -329,7 +329,7 @@ def select_candidates(tce, excluded_tics, seen_tics, limit=0):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Select catalog-unlisted TESS targets with public QLP light curves.")
+    parser = argparse.ArgumentParser(description="Select QLP-observed TESS targets without matches in the queried signal catalogs.")
     parser.add_argument("--source", choices=["qlp", "tce"], default="qlp",
                         help="QLP observed-target pool (default) or legacy SPOC TCE pool")
     parser.add_argument("--sectors", default="97-98",
@@ -371,10 +371,10 @@ def main():
     candidates.to_csv(args.output, index=False)
     append_emitted_tics(args.emitted_file, candidates["tic_id"].tolist())
     print(f"Excluded {len(excluded)} TICs matching TOIs, confirmed planets, any indexed SPOC TCE, or ATLAS-VAR positions; skipped {len(seen)} processed/emitted TICs.")
-    print(f"Wrote {len(candidates)} new candidates to {args.output}")
+    print(f"Wrote {len(candidates)} TICs not previously emitted by this selector to {args.output}")
     print(f"Persistent emission ledger: {args.emitted_file}")
     print(f"Run: python tess_search.py --targets-file {args.output}")
-    print("Catalog screen passed means only no match in the queried catalogs; it cannot prove new discovery or absence of prior study.")
+    print("The QLP source targets have already had QLP processing; catalog clearance is not a new-discovery claim.")
     print("First 20 TICs:", candidates["tic_id"].astype(int).tolist()[:20])
 
 
