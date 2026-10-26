@@ -51,8 +51,9 @@ class TargetSelectionTests(unittest.TestCase):
         tmp = Path(".test_qlp_cache")
         tmp.mkdir(exist_ok=True)
         try:
-            (tmp / "qlp_targets_s0001.csv").write_text("TIC,RA,DEC\n101,10,20\n", encoding="utf-8")
-            (tmp / "qlp_targets_s0002.csv").write_text("TIC,RA,DEC\n101,10,20\n202,30,-5\n", encoding="utf-8")
+            # Match the actual MAST QLP sector-list format: headerless TIC, RA, Dec.
+            (tmp / "qlp_targets_s0001.csv").write_text("101,10,20\n", encoding="utf-8")
+            (tmp / "qlp_targets_s0002.csv").write_text("101,10,20\n202,30,-5\n", encoding="utf-8")
             with patch("unsearched_targets.CACHE_DIR", str(tmp)):
                 merged = load_qlp_target_catalog(session=None, sectors=[1, 2])
             row = merged.set_index("tic_id").loc["101"]
