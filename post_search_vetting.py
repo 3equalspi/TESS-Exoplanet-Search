@@ -160,7 +160,7 @@ def review(row, cache, output):
     for center in epoch + np.arange(k0, k1 + 1) * period:
         ax[0].axvline(center, color="tab:red", alpha=.2, lw=.6)
     ax[0].set(ylabel="Normalized flux", xlabel="Time (BTJD)")
-    ax[0].set_title(f"TIC {tic} P={period:.6f} d SDE={row['sde']:.1f}: {'; '.join(flags)}")
+    ax[0].set_title(f"TIC {tic} P={period:.6f} d SDE={row['sde']:.1f}: {', '.join(flags)}\nSignal review only; novelty and planet status not established")
     ax[1].plot(phase / period, y, "k.", ms=1, alpha=.25)
     ax[1].set_xlim(-2 * duration / period, 2 * duration / period)
     ax[1].set(ylabel="Normalized flux", xlabel="Orbital phase")
@@ -228,6 +228,7 @@ def main():
         if key in done:
             continue
         print(f"Reviewing TIC {row['tic_id']} at P={row['period_days']:.6f} d...")
+        print("  Signal review only: this does not establish novelty or planet status.")
         try:
             result = review(row, args.cache_dir, args.output_dir)
         except Exception as exc:
@@ -256,4 +257,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
