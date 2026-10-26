@@ -44,6 +44,14 @@ class TargetSelectionTests(unittest.TestCase):
         ranked = select_qlp_candidates(pool, set(), set())
         self.assertEqual(ranked.tic_id.tolist(), ["303", "202", "101"])
 
+    def test_same_coverage_tier_is_stably_shuffled_not_numeric_prefix_sorted(self):
+        pool = pd.DataFrame({"tic_id": ["1000000001", "1000000002", "1000000003", "1000000004"],
+                             "sector_count": [1, 1, 1, 1]})
+        first = select_qlp_candidates(pool, set(), set()).tic_id.tolist()
+        second = select_qlp_candidates(pool, set(), set()).tic_id.tolist()
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, sorted(first))
+
     def test_sector_ranges(self):
         self.assertEqual(parse_sectors("2,4-5,8"), [2, 4, 5, 8])
 
