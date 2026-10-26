@@ -239,7 +239,9 @@ def coordinate_matched_tics(targets, catalogs, radius_arcsec=10.0):
             part = catalog.iloc[start:start + 250_000]
             catalog_coords = SkyCoord(ra=part.ra.to_numpy(dtype=float) * u.deg,
                                       dec=part.dec.to_numpy(dtype=float) * u.deg)
-            target_idx, _, _, _ = target_coords.search_around_sky(
+            # SkyCoord.search_around_sky returns indices into its argument
+            # first, then indices into self (the target coordinates here).
+            _, target_idx, _, _ = target_coords.search_around_sky(
                 catalog_coords, radius_arcsec * u.arcsec
             )
             if len(target_idx):
