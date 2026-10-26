@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -156,7 +157,13 @@ def select_qlp_candidates(targets, excluded_tics, seen_tics, limit=0, min_sector
     result = result[~result["tic_id"].isin(excluded)]
     if "sector_count" in result:
         result = result[result["sector_count"] >= min_sectors]
-        result = result.sort_values(["sector_count", "tic_id"], ascending=[True, True])
+        # TIC IDs are labels, not a scientific priority. Hash within each
+        # coverage tier to avoid every batch being the numerically smallest IDs.
+        result["_stable_order"] = result["tic_id"].map(
+            lambda tic: hashlib.sha256(str(tic).encode("ascii")).hexdigest()
+        )
+        result = result.sort_values(["sector_count", "_stable_order"])
+        result = result.drop(columns=["_stable_order"])
     return result.head(limit) if limit > 0 else result
 
 
