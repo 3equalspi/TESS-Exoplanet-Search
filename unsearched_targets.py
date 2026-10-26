@@ -115,7 +115,18 @@ def load_qlp_target_catalog(session, sectors):
     for sector in sectors:
         name = f"qlp_targets_s{sector:04d}.csv"
         path = download_once(QLP_TARGET_LIST_URL.format(sector=sector), name, session)
-        frame = pd.read_csv(path, comment="#")
+        # QLP's published sector target lists are headerless TIC, RA, Dec CSVs;
+        # also accept a headered variant in case the archive format changes.
+        frame = pd.read_csv(path, comment="#", header=None)
+        first_row = [str(value).strip().lower() for value in frame.iloc[0].tolist()] if not frame.empty else []
+        has_header = any("tic" in value for value in first_row) and any("ra" in value for value in first_row)
+        if has_header:
+            frame.columns = frame.iloc[0].tolist()
+            frame = frame.iloc[1:].reset_index(drop=True)
+        else:
+            if frame.shape[1] < 3:
+                raise ValueError(f"Expected TIC, RA, Dec columns in {path}; found {frame.shape[1]} columns")
+            frame = frame.rename(columns={frame.columns[0]: "tic_id", frame.columns[1]: "ra", frame.columns[2]: "dec"})
         tic_col = find_tic_column(frame)
         ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
         dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
