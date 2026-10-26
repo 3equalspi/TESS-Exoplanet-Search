@@ -6,7 +6,7 @@ import pandas as pd
 from unsearched_targets import (
     select_candidates, select_qlp_candidates, parse_sectors,
     load_qlp_target_catalog, coordinate_matched_tics,
-    append_emitted_tics, read_seen_tics,
+    append_emitted_tics, read_seen_tics, tce_catalog_urls,
 )
 from vetting import primary_transit_passes
 
@@ -44,6 +44,23 @@ class TargetSelectionTests(unittest.TestCase):
         ranked = select_qlp_candidates(pool, set(), set())
         self.assertEqual(ranked.tic_id.tolist(), ["303", "202", "101"])
 
+    def test_same_coverage_tier_is_stably_shuffled_not_numeric_prefix_sorted(self):
+        pool = pd.DataFrame({"tic_id": ["1000000001", "1000000002", "1000000003", "1000000004"],
+                             "sector_count": [1, 1, 1, 1]})
+        first = select_qlp_candidates(pool, set(), set()).tic_id.tolist()
+        second = select_qlp_candidates(pool, set(), set()).tic_id.tolist()
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, sorted(first))
+
+    def test_live_tce_index_finds_late_sector_and_multisector_products(self):
+        html = ('<a href="/missions/tess/catalogs/tce/a-s0001-s0001_dvr-tcestats.csv">S1</a>'
+                '<a href="b-s0097-s0097_dvr-tcestats.csv">S97</a>'
+                '<a href="c-s0001-s0096_dvr-tcestats.csv">multi</a>')
+        urls = tce_catalog_urls(html)
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(any("s0097-s0097" in url for url in urls))
+        self.assertTrue(any("s0001-s0096" in url for url in urls))
+
     def test_sector_ranges(self):
         self.assertEqual(parse_sectors("2,4-5,8"), [2, 4, 5, 8])
 
@@ -51,8 +68,9 @@ class TargetSelectionTests(unittest.TestCase):
         tmp = Path(".test_qlp_cache")
         tmp.mkdir(exist_ok=True)
         try:
-            (tmp / "qlp_targets_s0001.csv").write_text("TIC,RA,DEC\n101,10,20\n", encoding="utf-8")
-            (tmp / "qlp_targets_s0002.csv").write_text("TIC,RA,DEC\n101,10,20\n202,30,-5\n", encoding="utf-8")
+            # Match the actual MAST QLP sector-list format: headerless TIC, RA, Dec.
+            (tmp / "qlp_targets_s0001.csv").write_text("101,10,20\n", encoding="utf-8")
+            (tmp / "qlp_targets_s0002.csv").write_text("101,10,20\n202,30,-5\n", encoding="utf-8")
             with patch("unsearched_targets.CACHE_DIR", str(tmp)):
                 merged = load_qlp_target_catalog(session=None, sectors=[1, 2])
             row = merged.set_index("tic_id").loc["101"]

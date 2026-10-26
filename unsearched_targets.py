@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import hashlib
+import re
 import os
 import time
 from pathlib import Path
+from urllib.parse import urljoin
 
 import numpy as np
 
@@ -14,10 +17,13 @@ from requests.adapters import HTTPAdapter, Retry
 CACHE_DIR = "catalog_cache"
 TCE_URL = ("https://archive.stsci.edu/missions/tess/catalogs/tce/"
            "tess2018206190142-s0001-s0096_dvr-tcestats.csv")
+TCE_INDEX_URL = "https://archive.stsci.edu/tess/bulk_downloads/bulk_downloads_tce.html"
 TOI_URL = "https://archive.stsci.edu/missions/tess/catalogs/toi/tois.csv"
 TOI_URL_FALLBACK = "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"
 MES_MIN, MES_MAX = 7.5, 20.0
 QLP_TARGET_LIST_URL = "https://archive.stsci.edu/hlsps/qlp/target_lists/s{sector:04d}.csv"
+ATLAS_VAR_URL = ("https://archive.stsci.edu/hlsps/atlas-var/"
+                 "hlsp_atlas-var_atlas_ccd_all_cyan-orange_dr1_object.fits")
 
 
 def _session_with_retries():
@@ -55,15 +61,42 @@ def clean_tics(series):
     return series.astype(str).str.extract(r"(\d+)", expand=False).dropna().astype(str)
 
 
+def tce_catalog_urls(index_html):
+    """Extract unique TCE statistics CSV URLs from the current MAST index."""
+    hrefs = re.findall(r'href=["\']([^"\']*_dvr-tcestats\.csv)["\']', index_html, re.I)
+    return sorted({urljoin(TCE_INDEX_URL, href) for href in hrefs})
+
+
 def load_tce_catalog(session):
-    path = download_once(TCE_URL, "tce_all_sectors.csv", session)
-    df = pd.read_csv(path, comment="#")
-    tic_col = find_tic_column(df)
-    mes_col = next((c for c in df.columns if "mes" in c.lower() or "mult_ev" in c.lower()), None)
-    df = df.rename(columns={tic_col: "tic_id"})
-    if mes_col:
-        df = df.rename(columns={mes_col: "mes"})
-    return df
+    """Load every SPOC TCE stats CSV linked by MAST's live bulk-download index."""
+    response = session.get(TCE_INDEX_URL, timeout=60)
+    response.raise_for_status()
+    urls = tce_catalog_urls(response.text)
+    if not urls:
+        raise RuntimeError("MAST TCE index returned no TCE statistics CSV links; refusing an incomplete screen")
+    frames = []
+    for url in urls:
+        path = download_once(url, url.rsplit("/", 1)[-1], session)
+        df = pd.read_csv(path, comment="#")
+        tic_col = find_tic_column(df)
+        df = df.rename(columns={tic_col: "tic_id"})
+        mes_col = next((c for c in df.columns if "mes" in c.lower() or "mult_ev" in c.lower()), None)
+        if mes_col and mes_col != "mes":
+            df = df.rename(columns={mes_col: "mes"})
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True).drop_duplicates()
+
+
+def load_atlas_variable_catalog(session):
+    """Return ATLAS-VAR DR1 positions (4.7M published variable candidates)."""
+    path = download_once(ATLAS_VAR_URL, "atlas_var_dr1_object.fits", session, timeout=300)
+    from astropy.table import Table
+    frame = Table.read(path, hdu=1).to_pandas()
+    ra_col = next((c for c in frame.columns if c.lower() in {"ra", "raj2000"}), None)
+    dec_col = next((c for c in frame.columns if c.lower() in {"dec", "dej2000"}), None)
+    if not ra_col or not dec_col:
+        raise ValueError(f"ATLAS-VAR table has no RA/Dec columns: {list(frame.columns)}")
+    return frame.rename(columns={ra_col: "ra", dec_col: "dec"})[["ra", "dec"]]
 
 
 def load_toi_catalog(session):
@@ -80,7 +113,7 @@ def load_toi_catalog(session):
 def load_confirmed_tess_planets():
     from astroquery.ipac.nexsci.nasa_exoplanet_archive import NasaExoplanetArchive
     table = NasaExoplanetArchive.query_criteria(
-        table="pscomppars", select="tic_id,pl_name",
+        table="pscomppars", select="tic_id,pl_name,ra,dec",
         where="tran_flag=1 and tic_id is not null")
     df = table.to_pandas()
     return df.rename(columns={find_tic_column(df): "tic_id"})
@@ -115,7 +148,18 @@ def load_qlp_target_catalog(session, sectors):
     for sector in sectors:
         name = f"qlp_targets_s{sector:04d}.csv"
         path = download_once(QLP_TARGET_LIST_URL.format(sector=sector), name, session)
-        frame = pd.read_csv(path, comment="#")
+        # QLP's published sector target lists are headerless TIC, RA, Dec CSVs;
+        # also accept a headered variant in case the archive format changes.
+        frame = pd.read_csv(path, comment="#", header=None)
+        first_row = [str(value).strip().lower() for value in frame.iloc[0].tolist()] if not frame.empty else []
+        has_header = any("tic" in value for value in first_row) and any("ra" in value for value in first_row)
+        if has_header:
+            frame.columns = frame.iloc[0].tolist()
+            frame = frame.iloc[1:].reset_index(drop=True)
+        else:
+            if frame.shape[1] < 3:
+                raise ValueError(f"Expected TIC, RA, Dec columns in {path}; found {frame.shape[1]} columns")
+            frame = frame.rename(columns={frame.columns[0]: "tic_id", frame.columns[1]: "ra", frame.columns[2]: "dec"})
         tic_col = find_tic_column(frame)
         ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
         dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
@@ -145,12 +189,18 @@ def select_qlp_candidates(targets, excluded_tics, seen_tics, limit=0, min_sector
     result = result[~result["tic_id"].isin(excluded)]
     if "sector_count" in result:
         result = result[result["sector_count"] >= min_sectors]
-        result = result.sort_values(["sector_count", "tic_id"], ascending=[True, True])
+        # TIC IDs are labels, not a scientific priority. Hash within each
+        # coverage tier to avoid every batch being the numerically smallest IDs.
+        result["_stable_order"] = result["tic_id"].map(
+            lambda tic: hashlib.sha256(str(tic).encode("ascii")).hexdigest()
+        )
+        result = result.sort_values(["sector_count", "_stable_order"])
+        result = result.drop(columns=["_stable_order"])
     return result.head(limit) if limit > 0 else result
 
 
 def coordinate_matched_tics(targets, catalogs, radius_arcsec=10.0):
-    """Return TICs near TOI/confirmed-planet coordinates without SciPy."""
+    """Return TICs near catalog positions using chunked spherical matching."""
     if targets.empty or not {"ra", "dec"}.issubset(targets.columns):
         return set()
     catalog_parts = []
@@ -179,6 +229,31 @@ def coordinate_matched_tics(targets, catalogs, radius_arcsec=10.0):
     valid_idx = np.flatnonzero(valid)
     if not len(valid_idx):
         return set()
+    try:
+        import astropy.units as u
+        from astropy.coordinates import SkyCoord
+        target_coords = SkyCoord(ra=target_ra[valid_idx] * u.deg, dec=target_dec[valid_idx] * u.deg)
+        matched_targets = set()
+        # Chunk the 4.7M-row ATLAS catalog to keep memory use bounded.
+        for start in range(0, len(catalog), 250_000):
+            part = catalog.iloc[start:start + 250_000]
+            catalog_coords = SkyCoord(ra=part.ra.to_numpy(dtype=float) * u.deg,
+                                      dec=part.dec.to_numpy(dtype=float) * u.deg)
+            # SkyCoord.search_around_sky returns indices into its argument
+            # first, then indices into self (the target coordinates here).
+            _, target_idx, _, _ = target_coords.search_around_sky(
+                catalog_coords, radius_arcsec * u.arcsec
+            )
+            if len(target_idx):
+                matched_targets.update(targets.iloc[valid_idx[np.unique(target_idx)]]["tic_id"].astype(str))
+                if len(matched_targets) == len(set(targets.iloc[valid_idx]["tic_id"].astype(str))):
+                    break
+        return matched_targets
+    except ImportError:
+        # Keep a dependency-light fallback for small catalogs and unit tests.
+        if len(catalog) > 100_000:
+            raise RuntimeError("Large-catalog coordinate screening requires SciPy; install the project dependencies")
+
     order = valid_idx[np.argsort(target_dec[valid_idx])]
     sorted_dec = target_dec[order]
     sorted_ra = target_ra[order]
@@ -254,7 +329,7 @@ def select_candidates(tce, excluded_tics, seen_tics, limit=0):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Select catalog-unlisted TESS targets with public QLP light curves.")
+    parser = argparse.ArgumentParser(description="Select QLP-observed TESS targets without matches in the queried signal catalogs.")
     parser.add_argument("--source", choices=["qlp", "tce"], default="qlp",
                         help="QLP observed-target pool (default) or legacy SPOC TCE pool")
     parser.add_argument("--sectors", default="97-98",
@@ -278,10 +353,12 @@ def main():
         sectors = parse_sectors(args.sectors)
         print(f"Loading public QLP target lists for sectors {sectors}...")
         pool = load_qlp_target_catalog(session, sectors)
-        print("Loading SPOC TCE catalog to remove targets with cataloged transit-like events...")
+        print("Loading all public SPOC TCE catalogs linked by MAST...")
         tce = load_tce_catalog(session)
         excluded |= set(clean_tics(tce["tic_id"]))
-        excluded |= coordinate_matched_tics(pool, [toi, confirmed])
+        print("Loading ATLAS-VAR DR1 positions to remove previously cataloged variable stars...")
+        atlas_var = load_atlas_variable_catalog(session)
+        excluded |= coordinate_matched_tics(pool, [toi, confirmed, atlas_var], radius_arcsec=10.0)
     else:
         print("Loading SPOC TCE catalog...")
         pool = load_tce_catalog(session)
@@ -293,11 +370,11 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     candidates.to_csv(args.output, index=False)
     append_emitted_tics(args.emitted_file, candidates["tic_id"].tolist())
-    print(f"Excluded {len(excluded)} TICs with TOIs, confirmed planets, or SPOC TCEs; skipped {len(seen)} processed/emitted TICs.")
-    print(f"Wrote {len(candidates)} new candidates to {args.output}")
+    print(f"Excluded {len(excluded)} TICs matching TOIs, confirmed planets, any indexed SPOC TCE, or ATLAS-VAR positions; skipped {len(seen)} processed/emitted TICs.")
+    print(f"Wrote {len(candidates)} TICs not previously emitted by this selector to {args.output}")
     print(f"Persistent emission ledger: {args.emitted_file}")
     print(f"Run: python tess_search.py --targets-file {args.output}")
-    print("These are catalog-unlisted targets, not proof that a star has never been studied.")
+    print("The QLP source targets have already had QLP processing; catalog clearance is not a new-discovery claim.")
     print("First 20 TICs:", candidates["tic_id"].astype(int).tolist()[:20])
 
 
