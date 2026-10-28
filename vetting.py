@@ -17,3 +17,4 @@ def primary_transit_passes(measured_depth, fitted_depth, out_of_transit_scatter,
     snr = measured_depth / max(depth_sigma, 1e-12)
     depth_ratio = measured_depth / fitted_depth
     return snr >= min_snr and 0.5 <= depth_ratio <= 1.5
+
