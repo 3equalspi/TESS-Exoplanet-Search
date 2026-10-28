@@ -466,7 +466,7 @@ def main():
     parser.add_argument("--source", choices=["qlp", "tce"], default="qlp",
                         help="QLP observed-target pool (default) or legacy SPOC TCE pool")
     parser.add_argument("--sectors", default="97-98",
-                        help="TESS sectors as numbers/ranges; QLP lists are preferred, with MIT SPOC target lists as fallback")
+                        help="TESS sectors as numbers/ranges; prefers QLP, then MIT SPOC lists, then a MAST SPOC query")
     parser.add_argument("--min-sectors", type=int, default=1,
                         help="Require this many QLP sectors for each TIC")
     parser.add_argument("--processed-file", type=Path, default=Path("tess_lc_cache/processed_targets.csv"))
@@ -484,7 +484,7 @@ def main():
     excluded = set(clean_tics(toi["tic_id"])) | set(clean_tics(confirmed["tic_id"]))
     if args.source == "qlp":
         sectors = parse_sectors(args.sectors)
-        print(f"Loading QLP/MIT target lists for sectors {sectors}...")
+        print(f"Loading QLP/MIT/MAST SPOC target lists for sectors {sectors}...")
         pool = load_qlp_target_catalog(session, sectors)
         print("Loading all public SPOC TCE catalogs linked by MAST...")
         excluded |= load_tce_tic_ids(session, pool["tic_id"].astype(str))
