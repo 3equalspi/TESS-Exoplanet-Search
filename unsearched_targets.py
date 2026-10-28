@@ -31,6 +31,16 @@ ATLAS_VAR_URL = ("https://archive.stsci.edu/hlsps/atlas-var/"
 
 def _session_with_retries():
     s = requests.Session()
+    # On Linux, prefer the OS trust store when it is present. It can include
+    # current roots or locally installed enterprise roots missing from an
+    # older certifi bundle. REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE still override
+    # this through requests' normal environment handling.
+    for ca_bundle in ("/etc/ssl/certs/ca-certificates.crt",
+                      "/etc/pki/tls/certs/ca-bundle.crt",
+                      "/etc/ssl/cert.pem"):
+        if os.name == "posix" and Path(ca_bundle).is_file():
+            s.verify = ca_bundle
+            break
     s.mount("https://", HTTPAdapter(max_retries=Retry(total=5, backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504])))
     return s
@@ -45,7 +55,14 @@ def download_once(url, fname, session=None, timeout=180):
     session = session or _session_with_retries()
     print(f"  -> Downloading {url}")
     t0 = time.time()
-    response = session.get(url, timeout=timeout, stream=True)
+    try:
+        response = session.get(url, timeout=timeout, stream=True)
+    except requests.exceptions.SSLError as exc:
+        raise RuntimeError(
+            f"TLS certificate verification failed for {url}. The downloader uses trusted CA certificates "
+            "and does not disable verification. Update the OS CA bundle, or install your network's trusted "
+            "root certificate and set REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem."
+        ) from exc
     response.raise_for_status()
     temporary_path = f"{path}.part"
     byte_count = 0
