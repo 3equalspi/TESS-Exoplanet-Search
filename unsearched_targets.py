@@ -240,7 +240,7 @@ def load_mast_spoc_sector_targets(sector):
         "dec": pd.to_numeric(np.asarray(observations["s_dec"]), errors="coerce"),
     })
     frame["tic_id"] = frame["target_name"].str.extract(
-        r"(?i)\\bTIC[\\s_-]*0*(\\d+)\\b", expand=False
+        r"(?i)\bTIC[\s_-]*0*(\d+)\b", expand=False
     )
     frame = frame.dropna(subset=["tic_id"]).drop_duplicates("tic_id")
     if frame.empty:
