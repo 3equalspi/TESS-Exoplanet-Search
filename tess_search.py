@@ -14,6 +14,7 @@ import lightkurve as lk
 from astropy.timeseries import BoxLeastSquares
 from transitleastsquares import transitleastsquares
 from vetting import primary_transit_passes
+from lightcurve_io import download_search_result, looks_transient
 
 class StepTimeout(Exception):
     pass
@@ -114,12 +115,7 @@ def _purge_cache_for_tic(tic_id):
     return removed
 
 def _looks_transient(msg):
-    m = msg.lower()
-    return any(k in m for k in (
-        "remotedisconnected", "connection aborted", "connection reset",
-        "max retries exceeded", "timeout", "timed out", "ssleoferror",
-        "unexpected_eof", "temporarily unavailable", "502", "503", "504",
-    ))
+    return looks_transient(msg)
 
 DOWNLOAD_MAX_ATTEMPTS = 4
 DOWNLOAD_RETRY_BACKOFF = [15, 45, 120]
@@ -128,15 +124,18 @@ CLEAN_STEP_TIMEOUT_S = 180
 
 def get_stitched_lc(tic_id):
     last_err = None
+    stage = "MAST catalog search"
     for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
         try:
             suffix = f" (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})" if attempt > 1 else ""
             print(f"  -> Searching MAST...{suffix}", flush=True)
+            stage = "MAST SPOC catalog search"
             search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC")
             source = "SPOC"
             if len(search) == 0:
                 # QLP FFI light curves cover many more stars than the SPOC
                 # short-cadence target list and power the expanded target pool.
+                stage = "MAST QLP catalog search"
                 search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP")
                 source = "QLP"
             if len(search) == 0:
@@ -145,8 +144,27 @@ def get_stitched_lc(tic_id):
 
             print(f"  -> Downloading {len(search)} {source} sector(s)...", flush=True)
             t0 = time.time()
-            with time_limit(DOWNLOAD_STEP_TIMEOUT_S, "download"):
-                lc_coll = search.download_all(download_dir=CACHE_DIR, quality_bitmask=QUALITY_BITMASK)
+            stage = f"{source} light-curve product download"
+            try:
+                with time_limit(DOWNLOAD_STEP_TIMEOUT_S, "download"):
+                    lc_coll = download_search_result(
+                        search, lk, CACHE_DIR, QUALITY_BITMASK
+                    )
+            except Exception as spoc_download_error:
+                if source != "SPOC":
+                    raise
+                print(f"  -> SPOC products failed ({spoc_download_error}); trying QLP products...", flush=True)
+                stage = "MAST QLP catalog search"
+                qlp_search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP")
+                if len(qlp_search) == 0:
+                    raise RuntimeError(f"SPOC product download failed and no QLP products were found: {spoc_download_error}") from spoc_download_error
+                print(f"  -> Downloading {len(qlp_search)} QLP sector(s)...", flush=True)
+                source = "QLP"
+                stage = "QLP light-curve product download"
+                with time_limit(DOWNLOAD_STEP_TIMEOUT_S, "QLP download"):
+                    lc_coll = download_search_result(
+                        qlp_search, lk, CACHE_DIR, QUALITY_BITMASK
+                    )
             print(f"  -> Download done ({time.time()-t0:.1f}s)", flush=True)
             if lc_coll is None:
                 return None
@@ -207,8 +225,7 @@ def get_stitched_lc(tic_id):
                 print(f"     Retrying in {wait}s...", flush=True)
                 time.sleep(wait)
                 continue
-            print(f"  -> Giving up on TIC {tic_id} after repeated timeouts.")
-            return None
+            raise RuntimeError(f"{stage} repeatedly timed out for TIC {tic_id}: {e}") from e
 
         except Exception as e:
             last_err = e
@@ -228,11 +245,9 @@ def get_stitched_lc(tic_id):
                 time.sleep(wait)
                 continue
 
-            print(f"  -> Error downloading TIC {tic_id}: {e}")
-            return None
+            raise RuntimeError(f"{stage} failed for TIC {tic_id}: {type(e).__name__}: {e}") from e
 
-    print(f"  -> Giving up on TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
-    return None
+    raise RuntimeError(f"{stage} failed for TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
 
 def bls_pretriage(lc, period_min=PERIOD_MIN, period_max=PERIOD_MAX, durations=None):
     durations = SHORT_REGIME_DURATIONS if durations is None else durations
@@ -849,8 +864,14 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print(f"Processing TIC {tic_id}...")
 
+        download_succeeded = False
         try:
-            lc = get_stitched_lc(tic_id)
+            try:
+                lc = get_stitched_lc(tic_id)
+                download_succeeded = True
+            except Exception as e:
+                print(f"  -> Retrieval failed for TIC {tic_id}; it remains unprocessed and can be retried: {type(e).__name__}: {e}", flush=True)
+                continue
 
             if lc is None or len(lc.time) < 100:
                 print("  -> Skipped")
@@ -981,6 +1002,7 @@ if __name__ == "__main__":
                           "shouldn't get to delete data from the residual search.")
                     break
         finally:
-            mark_processed(tic_id)
+            if download_succeeded:
+                mark_processed(tic_id)
 
     print("\nDone.")
