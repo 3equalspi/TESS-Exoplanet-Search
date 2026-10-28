@@ -23,31 +23,15 @@ TOI_URL = "https://archive.stsci.edu/missions/tess/catalogs/toi/tois.csv"
 TOI_URL_FALLBACK = "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"
 MES_MIN, MES_MAX = 7.5, 20.0
 QLP_TARGET_LIST_URL = "https://archive.stsci.edu/hlsps/qlp/target_lists/s{sector:04d}.csv"
-MIT_TARGET_LIST_URL = ("https://tess.mit.edu/public/target_lists/2m/"
-                       "all_targets_S{sector}_v1.csv")
 ATLAS_VAR_URL = ("https://archive.stsci.edu/hlsps/atlas-var/"
                  "hlsp_atlas-var_atlas_ccd_all_cyan-orange_dr1_object.fits")
 
 
 def _session_with_retries():
     s = requests.Session()
-    # On Linux, prefer the OS trust store when it is present. It can include
-    # current roots or locally installed enterprise roots missing from an
-    # older certifi bundle. REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE still override
-    # this through requests' normal environment handling.
-    for ca_bundle in ("/etc/ssl/certs/ca-certificates.crt",
-                      "/etc/pki/tls/certs/ca-bundle.crt",
-                      "/etc/ssl/cert.pem"):
-        if os.name == "posix" and Path(ca_bundle).is_file():
-            s.verify = ca_bundle
-            break
     s.mount("https://", HTTPAdapter(max_retries=Retry(total=5, backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504])))
     return s
-
-
-class TLSVerificationError(RuntimeError):
-    """Raised when a trusted certificate chain cannot be established."""
 
 
 def download_once(url, fname, session=None, timeout=180):
@@ -59,14 +43,7 @@ def download_once(url, fname, session=None, timeout=180):
     session = session or _session_with_retries()
     print(f"  -> Downloading {url}")
     t0 = time.time()
-    try:
-        response = session.get(url, timeout=timeout, stream=True)
-    except requests.exceptions.SSLError as exc:
-        raise TLSVerificationError(
-            f"TLS certificate verification failed for {url}. The downloader uses trusted CA certificates "
-            "and does not disable verification. Update the OS CA bundle, or install your network's trusted "
-            "root certificate and set REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem."
-        ) from exc
+    response = session.get(url, timeout=timeout, stream=True)
     response.raise_for_status()
     temporary_path = f"{path}.part"
     byte_count = 0
@@ -210,103 +187,37 @@ def parse_sectors(spec):
     return sorted(sectors)
 
 
-def load_mast_spoc_sector_targets(sector):
-    """Query MAST for SPOC time-series targets in one sector."""
-    from astroquery.mast import Observations
-
-    try:
-        observations = Observations.query_criteria(
-            obs_collection="TESS",
-            provenance_name=["SPOC", "TESS-SPOC"],
-            sequence_number=sector,
-            dataproduct_type="timeseries",
-            intentType="science",
-            pagesize=50000,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not retrieve SPOC targets for Sector {sector} from MAST. "
-            "The static MIT list was unavailable and the MAST query also failed; "
-            "check HTTPS access and CA certificates for archive.stsci.edu and mast.stsci.edu."
-        ) from exc
-
-    required = {"target_name", "s_ra", "s_dec"}
-    missing = required.difference(observations.colnames)
-    if missing:
-        raise ValueError(f"MAST observation results lack required columns: {sorted(missing)}")
-    frame = pd.DataFrame({
-        "target_name": np.asarray(observations["target_name"]).astype(str),
-        "ra": pd.to_numeric(np.asarray(observations["s_ra"]), errors="coerce"),
-        "dec": pd.to_numeric(np.asarray(observations["s_dec"]), errors="coerce"),
-    })
-    frame["tic_id"] = frame["target_name"].str.extract(
-        r"(?i)\bTIC[\s_-]*0*(\d+)\b", expand=False
-    )
-    frame = frame.dropna(subset=["tic_id"]).drop_duplicates("tic_id")
-    if frame.empty:
-        raise RuntimeError(
-            f"MAST returned no TIC-named SPOC time-series targets for Sector {sector}; "
-            "refusing to create an empty target pool."
-        )
-    return frame[["tic_id", "ra", "dec"]]
-
-
 def load_qlp_target_catalog(session, sectors):
-    """Load QLP targets, then MIT lists, then a verified MAST SPOC query."""
+    """Load TICs with public QLP FFI light curves, grouped across sectors."""
     by_tic = {}
     available_sectors = []
     missing_sectors = []
     for sector in sectors:
         name = f"qlp_targets_s{sector:04d}.csv"
-        source = "MAST QLP observed-target list"
-        mast_frame = None
         try:
             path = download_once(QLP_TARGET_LIST_URL.format(sector=sector), name, session)
         except requests.exceptions.HTTPError as exc:
             if exc.response is None or exc.response.status_code != 404:
                 raise
-            mit_name = f"mit_targets_s{sector:04d}_2m.csv"
-            try:
-                print(f"  -> QLP list unavailable; trying MIT SPOC 2-minute targets for Sector {sector}.")
-                path = download_once(MIT_TARGET_LIST_URL.format(sector=sector), mit_name, session)
-                source = "MIT SPOC 2-minute target list"
-            except (TLSVerificationError, requests.exceptions.HTTPError) as mit_exc:
-                missing_list = isinstance(mit_exc, TLSVerificationError) or (
-                    mit_exc.response is not None and mit_exc.response.status_code == 404
-                )
-                if not missing_list:
-                    raise
-                if isinstance(mit_exc, TLSVerificationError):
-                    print("  -> MIT TLS certificate is not trusted; keeping verification enabled and querying MAST.")
-                else:
-                    print(f"  -> MIT list is unavailable for Sector {sector}; querying MAST.")
-                mast_frame = load_mast_spoc_sector_targets(sector)
-                source = "MAST SPOC observation query"
+            missing_sectors.append(sector)
+            print(f"  -> QLP target list for Sector {sector} is not published at the expected URL (404); skipping that sector.")
+            continue
         available_sectors.append(sector)
-        if mast_frame is not None:
-            frame = mast_frame
-            tic_col, ra_col, dec_col = "tic_id", "ra", "dec"
-        elif source.startswith("MIT"):
-            frame = pd.read_csv(path, comment="#")
-            tic_col = next((c for c in frame.columns if c.lower().replace("_", "") in {"ticid", "tic"}), None)
-            if tic_col is None:
-                raise ValueError(f"No TICID column found in MIT target list {path}: {list(frame.columns)}")
-            ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
-            dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
+        # QLP's published sector target lists are headerless TIC, RA, Dec CSVs;
+        # also accept a headered variant in case the archive format changes.
+        frame = pd.read_csv(path, comment="#", header=None)
+        first_row = [str(value).strip().lower() for value in frame.iloc[0].tolist()] if not frame.empty else []
+        has_header = any("tic" in value for value in first_row) and any("ra" in value for value in first_row)
+        if has_header:
+            frame.columns = frame.iloc[0].tolist()
+            frame = frame.iloc[1:].reset_index(drop=True)
         else:
-            frame = pd.read_csv(path, comment="#", header=None)
-            first_row = [str(value).strip().lower() for value in frame.iloc[0].tolist()] if not frame.empty else []
-            has_header = any("tic" in value for value in first_row) and any("ra" in value for value in first_row)
-            if has_header:
-                frame.columns = frame.iloc[0].tolist()
-                frame = frame.iloc[1:].reset_index(drop=True)
-            else:
-                if frame.shape[1] < 3:
-                    raise ValueError(f"Expected TIC, RA, Dec columns in {path}; found {frame.shape[1]} columns")
-                frame = frame.rename(columns={frame.columns[0]: "tic_id", frame.columns[1]: "ra", frame.columns[2]: "dec"})
-            tic_col = find_tic_column(frame)
-            ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
-            dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
+            if frame.shape[1] < 3:
+                raise ValueError(f"Expected TIC, RA, Dec columns in {path}; found {frame.shape[1]} columns")
+            frame = frame.rename(columns={frame.columns[0]: "tic_id", frame.columns[1]: "ra", frame.columns[2]: "dec"})
+        tic_col = find_tic_column(frame)
+        ra_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"ra", "radeg", "raj2000"}), None)
+        dec_col = next((c for c in frame.columns if c.lower().replace("_", "").strip() in {"dec", "decdeg", "dej2000"}), None)
         frame["_clean_tic"] = clean_tics(frame[tic_col])
         for _, row in frame.dropna(subset=["_clean_tic"]).iterrows():
             tic = row["_clean_tic"]
@@ -316,13 +227,13 @@ def load_qlp_target_catalog(session, sectors):
                 entry["ra"] = pd.to_numeric(row[ra_col], errors="coerce")
                 entry["dec"] = pd.to_numeric(row[dec_col], errors="coerce")
     if not available_sectors:
-        raise RuntimeError("None of the requested QLP, MIT, or MAST target sources were available; no candidates were selected.")
+        raise RuntimeError("None of the requested QLP sector target lists were available; no candidates were selected.")
     if missing_sectors:
         print(f"  -> Partial sector pool: using {available_sectors}; unavailable sectors: {missing_sectors}.")
     rows = [{"tic_id": tic, "sector_count": len(info["sectors"]),
              "sectors": ";".join(str(sector) for sector in sorted(info["sectors"])),
              "ra": info["ra"], "dec": info["dec"],
-             "source_catalog": "MAST QLP, MIT SPOC, and/or MAST SPOC observation query"}
+             "source_catalog": "MAST QLP observed-target list"}
             for tic, info in by_tic.items()]
     return pd.DataFrame(rows, columns=["tic_id", "sector_count", "sectors", "ra", "dec", "source_catalog"])
 
@@ -462,11 +373,11 @@ def select_candidates(tce, excluded_tics, seen_tics, limit=0):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Select TESS targets without matches in the queried signal catalogs.")
+    parser = argparse.ArgumentParser(description="Select QLP-observed TESS targets without matches in the queried signal catalogs.")
     parser.add_argument("--source", choices=["qlp", "tce"], default="qlp",
                         help="QLP observed-target pool (default) or legacy SPOC TCE pool")
     parser.add_argument("--sectors", default="97-98",
-                        help="TESS sectors as numbers/ranges; prefers QLP, then MIT SPOC lists, then a MAST SPOC query")
+                        help="QLP sectors as numbers/ranges; default skips sectors 99-104 with timing corrections")
     parser.add_argument("--min-sectors", type=int, default=1,
                         help="Require this many QLP sectors for each TIC")
     parser.add_argument("--processed-file", type=Path, default=Path("tess_lc_cache/processed_targets.csv"))
@@ -484,7 +395,7 @@ def main():
     excluded = set(clean_tics(toi["tic_id"])) | set(clean_tics(confirmed["tic_id"]))
     if args.source == "qlp":
         sectors = parse_sectors(args.sectors)
-        print(f"Loading QLP/MIT/MAST SPOC target lists for sectors {sectors}...")
+        print(f"Loading public QLP target lists for sectors {sectors}...")
         pool = load_qlp_target_catalog(session, sectors)
         print("Loading all public SPOC TCE catalogs linked by MAST...")
         excluded |= load_tce_tic_ids(session, pool["tic_id"].astype(str))
