@@ -119,7 +119,8 @@ def _looks_transient(msg):
     return any(k in m for k in (
         "remotedisconnected", "connection aborted", "connection reset",
         "max retries exceeded", "timeout", "timed out", "ssleoferror",
-        "unexpected_eof", "temporarily unavailable", "502", "503", "504",
+        "unexpected_eof", "temporarily unavailable", "request failed",
+        "service unavailable", "502", "503", "504",
     ))
 
 DOWNLOAD_MAX_ATTEMPTS = 4
@@ -128,17 +129,18 @@ DOWNLOAD_STEP_TIMEOUT_S = 900
 CLEAN_STEP_TIMEOUT_S = 180
 
 def get_stitched_lc(tic_id, sectors=None):
+    """Download and stitch available sectors; sector restriction is opt-in."""
     last_err = None
     for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
         try:
             suffix = f" (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})" if attempt > 1 else ""
             print(f"  -> Searching MAST...{suffix}", flush=True)
-            search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC", sector=sectors)
+            search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC", **({"sector": sectors} if sectors else {}))
             source = "SPOC"
             if len(search) == 0:
                 # QLP FFI light curves cover many more stars than the SPOC
                 # short-cadence target list and power the expanded target pool.
-                search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP", sector=sectors)
+                search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP", **({"sector": sectors} if sectors else {}))
                 source = "QLP"
             if len(search) == 0:
                 print(f"  -> No SPOC or QLP data for TIC {tic_id}")
@@ -208,8 +210,7 @@ def get_stitched_lc(tic_id, sectors=None):
                 print(f"     Retrying in {wait}s...", flush=True)
                 time.sleep(wait)
                 continue
-            print(f"  -> Giving up on TIC {tic_id} after repeated timeouts.")
-            return None
+            raise RuntimeError(f"Repeated timeouts while retrieving TIC {tic_id}: {e}") from e
 
         except Exception as e:
             last_err = e
@@ -229,11 +230,9 @@ def get_stitched_lc(tic_id, sectors=None):
                 time.sleep(wait)
                 continue
 
-            print(f"  -> Error downloading TIC {tic_id}: {e}")
-            return None
+            raise RuntimeError(f"Error retrieving TIC {tic_id}: {type(e).__name__}: {e}") from e
 
-    print(f"  -> Giving up on TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
-    return None
+    raise RuntimeError(f"Giving up on TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
 
 def bls_pretriage(lc, period_min=PERIOD_MIN, period_max=PERIOD_MAX, durations=None):
     durations = SHORT_REGIME_DURATIONS if durations is None else durations
@@ -844,12 +843,19 @@ def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Search TESS light curves for transit-like signals.")
     parser.add_argument("--targets-file", help="CSV with tic_id and optional sectors columns, or one TIC ID per line")
+    parser.add_argument("--use-input-sectors", action="store_true",
+                        help="Restrict each TIC to the sectors column in the input CSV (default: search all available sectors)")
     parser.add_argument("--limit", type=int, default=0, help="Maximum targets to process")
     args = parser.parse_args()
     selected_targets = load_targets_file(args.targets_file) if args.targets_file else [(tic, None) for tic in TARGET_LIST]
     if args.limit > 0:
         selected_targets = selected_targets[:args.limit]
     processed = load_processed()
+    # Preserve the original behavior by default: search every available sector.
+    # Sector-restricted searching is opt-in because newer selector sectors may
+    # not yet be indexed consistently by every MAST/light-curve product service.
+    if not args.use_input_sectors:
+        selected_targets = [(tic, None) for tic, _ in selected_targets]
     remaining = [(tic, sectors) for tic, sectors in selected_targets if str(tic) not in processed]
     print(f"Searching {len(selected_targets)} stars "
           f"({len(processed)} already done in a previous run, {len(remaining)} remaining).\n")
@@ -860,8 +866,14 @@ if __name__ == "__main__":
         sector_note = f" in sector(s) {sectors}" if sectors else ""
         print(f"Processing TIC {tic_id}{sector_note}...")
 
+        download_succeeded = False
         try:
-            lc = get_stitched_lc(tic_id, sectors=sectors)
+            try:
+                lc = get_stitched_lc(tic_id, sectors=sectors)
+                download_succeeded = True
+            except Exception as e:
+                print(f"  -> Download failed for TIC {tic_id}; it was not marked processed and can be retried: {type(e).__name__}: {e}", flush=True)
+                continue
 
             if lc is None or len(lc.time) < 100:
                 print("  -> Skipped")
@@ -992,7 +1004,8 @@ if __name__ == "__main__":
                           "shouldn't get to delete data from the residual search.")
                     break
         finally:
-            mark_processed(tic_id)
+            if download_succeeded:
+                mark_processed(tic_id)
 
     print("\nDone.")
 
