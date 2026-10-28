@@ -62,7 +62,7 @@ def download_once(url, fname, session=None, timeout=180):
     try:
         response = session.get(url, timeout=timeout, stream=True)
     except requests.exceptions.SSLError as exc:
-        raise RuntimeError(
+        raise TLSVerificationError(
             f"TLS certificate verification failed for {url}. The downloader uses trusted CA certificates "
             "and does not disable verification. Update the OS CA bundle, or install your network's trusted "
             "root certificate and set REQUESTS_CA_BUNDLE=/path/to/ca-bundle.pem."
