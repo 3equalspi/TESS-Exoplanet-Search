@@ -210,8 +210,7 @@ def get_stitched_lc(tic_id, sectors=None):
                 print(f"     Retrying in {wait}s...", flush=True)
                 time.sleep(wait)
                 continue
-            print(f"  -> Giving up on TIC {tic_id} after repeated timeouts.")
-            return None
+            raise RuntimeError(f"Repeated timeouts while retrieving TIC {tic_id}: {e}") from e
 
         except Exception as e:
             last_err = e
@@ -231,11 +230,9 @@ def get_stitched_lc(tic_id, sectors=None):
                 time.sleep(wait)
                 continue
 
-            print(f"  -> Error downloading TIC {tic_id}: {e}")
-            return None
+            raise RuntimeError(f"Error retrieving TIC {tic_id}: {type(e).__name__}: {e}") from e
 
-    print(f"  -> Giving up on TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
-    return None
+    raise RuntimeError(f"Giving up on TIC {tic_id} after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}")
 
 def bls_pretriage(lc, period_min=PERIOD_MIN, period_max=PERIOD_MAX, durations=None):
     durations = SHORT_REGIME_DURATIONS if durations is None else durations
@@ -869,8 +866,14 @@ if __name__ == "__main__":
         sector_note = f" in sector(s) {sectors}" if sectors else ""
         print(f"Processing TIC {tic_id}{sector_note}...")
 
+        download_succeeded = False
         try:
-            lc = get_stitched_lc(tic_id, sectors=sectors)
+            try:
+                lc = get_stitched_lc(tic_id, sectors=sectors)
+                download_succeeded = True
+            except Exception as e:
+                print(f"  -> Download failed for TIC {tic_id}; it was not marked processed and can be retried: {type(e).__name__}: {e}", flush=True)
+                continue
 
             if lc is None or len(lc.time) < 100:
                 print("  -> Skipped")
@@ -1001,7 +1004,8 @@ if __name__ == "__main__":
                           "shouldn't get to delete data from the residual search.")
                     break
         finally:
-            mark_processed(tic_id)
+            if download_succeeded:
+                mark_processed(tic_id)
 
     print("\nDone.")
 
