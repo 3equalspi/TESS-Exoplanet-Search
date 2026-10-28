@@ -4,6 +4,7 @@ import os
 import sys
 import glob
 import csv
+import re
 import time
 import signal
 import warnings
@@ -126,18 +127,18 @@ DOWNLOAD_RETRY_BACKOFF = [15, 45, 120]
 DOWNLOAD_STEP_TIMEOUT_S = 900
 CLEAN_STEP_TIMEOUT_S = 180
 
-def get_stitched_lc(tic_id):
+def get_stitched_lc(tic_id, sectors=None):
     last_err = None
     for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
         try:
             suffix = f" (attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS})" if attempt > 1 else ""
             print(f"  -> Searching MAST...{suffix}", flush=True)
-            search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC")
+            search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="SPOC", sector=sectors)
             source = "SPOC"
             if len(search) == 0:
                 # QLP FFI light curves cover many more stars than the SPOC
                 # short-cadence target list and power the expanded target pool.
-                search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP")
+                search = lk.search_lightcurve(f"TIC {tic_id}", mission="TESS", author="QLP", sector=sectors)
                 source = "QLP"
             if len(search) == 0:
                 print(f"  -> No SPOC or QLP data for TIC {tic_id}")
@@ -739,23 +740,32 @@ def plot_candidate(lc, tls_results, vet, tic_id, pass_suffix=""):
 # Main
 # -----------------------------------------------------------------
 def load_targets_file(path):
-    """Read a selector CSV with tic_id or a plain one-TIC-per-line list."""
+    """Read TIC IDs and optional sector coverage from a selector CSV/list."""
     with open(path, newline="", encoding="utf-8-sig") as f:
         sample = f.read(4096)
         f.seek(0)
         if "," in sample:
             reader = csv.DictReader(f)
-            column = next((c for c in (reader.fieldnames or [])
+            fields = reader.fieldnames or []
+            column = next((c for c in fields
                            if c and c.strip().lower().replace("_", " ") in ("tic id", "tic", "ticid")), None)
-            values = [row.get(column, "") for row in reader] if column else []
+            sector_column = next((c for c in fields if c and c.strip().lower() == "sectors"), None)
+            rows = [(row.get(column, ""), row.get(sector_column, "") if sector_column else "")
+                    for row in reader] if column else []
         else:
-            values = [line.strip() for line in f if line.strip()]
-    targets = []
-    for value in values:
+            rows = [(line.strip(), "") for line in f if line.strip()]
+    targets, seen = [], set()
+    for value, sector_text in rows:
         digits = "".join(ch for ch in str(value) if ch.isdigit())
-        if digits and int(digits) > 0:
-            targets.append(int(digits))
-    return list(dict.fromkeys(targets))
+        if not digits or int(digits) <= 0:
+            continue
+        tic = int(digits)
+        if tic in seen:
+            continue
+        seen.add(tic)
+        sectors = sorted({int(item) for item in re.findall(r"\d+", str(sector_text))})
+        targets.append((tic, sectors or None))
+    return targets
 RESULTS_LOG = os.path.join(CACHE_DIR, "processed_targets.csv")
 CANDIDATE_LOG = os.path.join(CACHE_DIR, "candidate_signals.csv")
 
@@ -833,24 +843,25 @@ def record_candidate_signal(tic_id, search_pass, period, epoch, depth, duration,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Search TESS light curves for transit-like signals.")
-    parser.add_argument("--targets-file", help="CSV with tic_id or one TIC ID per line")
+    parser.add_argument("--targets-file", help="CSV with tic_id and optional sectors columns, or one TIC ID per line")
     parser.add_argument("--limit", type=int, default=0, help="Maximum targets to process")
     args = parser.parse_args()
-    selected_targets = load_targets_file(args.targets_file) if args.targets_file else TARGET_LIST
+    selected_targets = load_targets_file(args.targets_file) if args.targets_file else [(tic, None) for tic in TARGET_LIST]
     if args.limit > 0:
         selected_targets = selected_targets[:args.limit]
     processed = load_processed()
-    remaining = [t for t in selected_targets if str(t) not in processed]
+    remaining = [(tic, sectors) for tic, sectors in selected_targets if str(tic) not in processed]
     print(f"Searching {len(selected_targets)} stars "
           f"({len(processed)} already done in a previous run, {len(remaining)} remaining).\n")
-    for i, tic_id in enumerate(remaining):
+    for i, (tic_id, sectors) in enumerate(remaining):
         if i > 0:
             time.sleep(3)
         print(f"\n{'='*60}")
-        print(f"Processing TIC {tic_id}...")
+        sector_note = f" in sector(s) {sectors}" if sectors else ""
+        print(f"Processing TIC {tic_id}{sector_note}...")
 
         try:
-            lc = get_stitched_lc(tic_id)
+            lc = get_stitched_lc(tic_id, sectors=sectors)
 
             if lc is None or len(lc.time) < 100:
                 print("  -> Skipped")
@@ -984,3 +995,4 @@ if __name__ == "__main__":
             mark_processed(tic_id)
 
     print("\nDone.")
+
